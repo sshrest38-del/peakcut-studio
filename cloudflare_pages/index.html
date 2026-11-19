@@ -838,7 +838,7 @@ dialog[open]{animation:fadein .16s ease}
 <div class="pop" id="bellpop" role="dialog" aria-label="Notifications" hidden></div>
 <div class="pop menu" id="acctpop" role="menu" hidden></div>
 
-<script src="/assets/gradient-ascii.js"></script>
+<script>window.GradientASCII = function() { return function() {}; };</script>
 <script>
 /* ============================================================ helpers */
 const $ = (s, r = document) => r.querySelector(s);
