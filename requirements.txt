@@ -1,0 +1,14 @@
+streamlit
+fastapi
+httpx
+numpy
+psycopg-binary
+python-multipart
+sherpa-onnx
+soundfile
+SQLAlchemy
+uvicorn
+yt-dlp
+pillow
+requests
+opencv-python-headless
