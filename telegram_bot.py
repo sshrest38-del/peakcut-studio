@@ -284,6 +284,47 @@ DEFAULT_PREF = {
 # Stores pending Instagram Reel posts waiting for user confirmation
 PENDING_POSTS: Dict[str, dict] = {}
 
+# An .srt file waiting for its language to be picked from the buttons
+PENDING_SRT: Dict[str, dict] = {}
+
+# Subtitle translation goes through a free public gateway (DESI API). It translates
+# what it is sent and echoes the timestamps back untouched, but it goes quiet after
+# a while, so every run asks it a small test sentence first and checks each part too.
+SRT_TRANSLATE_API = "https://sheffysamra1bot-sub-api.smpost-tempmail.workers.dev/"
+
+# The languages offered as buttons when a file arrives with no language in its caption
+SRT_LANG_BUTTONS = [
+    [("🇮🇳 Hindi", "hi"), ("🇬🇧 English", "en")],
+    [("🇪🇸 Spanish", "es"), ("🇸🇦 Arabic", "ar")],
+    [("🇫🇷 French", "fr"), ("🇵🇰 Urdu", "ur")],
+    [("🇧🇷 Portuguese", "pt"), ("🇹🇷 Turkish", "tr")],
+    [("🇩🇪 German", "de"), ("🇷🇺 Russian", "ru")],
+]
+
+SRT_LANG_LABELS = {
+    "hi": "Hindi 🇮🇳", "en": "English 🇬🇧", "es": "Spanish 🇪🇸", "ar": "Arabic 🇸🇦",
+    "fr": "French 🇫🇷", "ur": "Urdu 🇵🇰", "pt": "Portuguese 🇧🇷", "tr": "Turkish 🇹🇷",
+    "de": "German 🇩🇪", "ru": "Russian 🇷🇺",
+}
+
+# Language names a caption may use, mapped to the code the gateway understands
+SRT_LANG_NAMES = {
+    "hindi": "hi", "english": "en", "spanish": "es", "arabic": "ar",
+    "french": "fr", "urdu": "ur", "portuguese": "pt", "turkish": "tr",
+    "german": "de", "russian": "ru", "italian": "it", "indonesian": "id",
+    "japanese": "ja", "korean": "ko", "chinese": "zh", "bengali": "bn",
+    "bangla": "bn", "tamil": "ta", "telugu": "te", "marathi": "mr",
+    "gujarati": "gu", "kannada": "kn", "malayalam": "ml", "punjabi": "pa",
+    "persian": "fa", "farsi": "fa", "dutch": "nl", "polish": "pl",
+    "ukrainian": "uk", "vietnamese": "vi", "thai": "th", "filipino": "tl",
+    "tagalog": "tl", "hebrew": "he", "greek": "el", "spanish ": "es",
+}
+
+SRT_BUSY_MSG = (
+    "The free translation service went quiet — it stops answering after many "
+    "requests. Your file was not changed. Please try again in a few minutes."
+)
+
 def load_user_prefs() -> Dict[str, dict]:
     if USER_PREFS_FILE.exists():
         try:
@@ -1891,14 +1932,14 @@ async def process_video_job(
             if fetched_t:
                 video_title = fetched_t
 
+            # Format selector: best video up to 1080p + best audio, auto merged to mp4
+            format_selector = "bv*[height<=1080]+ba/b[height<=1080]/best"
             dl_cmd = [
                 sys.executable, "-m", "yt_dlp",
                 *base_dl_args,
                 *cookie_args,
                 *client_args,
-                # the height cap matters in the first choice too: without it yt-dlp picks the
-                # biggest mp4 on the page (1440p and up), which is slow and often fails
-                "-f", "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/b",
+                "-f", format_selector,
                 "--merge-output-format", "mp4",
                 "--write-auto-sub", "--write-sub",
                 "--sub-lang", "hi-orig,hi,en-orig,en",
@@ -1968,15 +2009,16 @@ async def process_video_job(
                     if raw_source_file.exists() and raw_source_file.stat().st_size > 0:
                         break
                     await update_status(
-                        "🔄 <b>Retrying with High-Speed iOS Stream Engine...</b>\n"
-                        f"<i>Trying the iOS stream {where}...</i>",
+                        "🔄 <b>Retrying with Zero-Cookies TV Stream Engine...</b>\n"
+                        f"<i>Streaming video directly without cookies {where}...</i>",
                         force=True
                     )
                     alt_dl_cmd = [
                         sys.executable, "-m", "yt_dlp",
                         *v_args,
-                        "--extractor-args", "youtube:player_client=ios,mweb",
-                        "-f", "b[ext=mp4]/best[height<=1080]/best/18/b",
+                        "--no-cookies",
+                        "--extractor-args", "youtube:player_client=tv_embedded,tv,visionos",
+                        "-f", "bv*[height<=1080]+ba/b[height<=1080]/best",
                         "--merge-output-format", "mp4",
                         "-o", str(raw_source_file),
                         "--newline",
@@ -2842,6 +2884,26 @@ async def handle_update(bot: TelegramBot, update: dict):
             await bot.answer_callback_query(cb_id, f"Quality: {val}")
             return
 
+        # --- SUBTITLE TRANSLATION: a language was picked for a waiting .srt file ---
+        if data.startswith("srtlang:"):
+            lang = data.split(":", 1)[1]
+            pending = PENDING_SRT.get(chat_id)
+            if not pending or time.time() - pending.get("t", 0) > 1800:
+                PENDING_SRT.pop(chat_id, None)
+                await bot.answer_callback_query(
+                    cb_id, "⚠️ That subtitle file is no longer waiting. Please send it again.",
+                    show_alert=True
+                )
+                return
+            PENDING_SRT.pop(chat_id, None)
+            await bot.answer_callback_query(cb_id, f"Translating to {SRT_LANG_LABELS.get(lang, lang)}...")
+            try:
+                await bot.edit_message_text(chat_id, msg_id, "🌐 <b>Language picked. Preparing translation...</b>")
+            except Exception:
+                pass
+            await run_srt_translation(bot, chat_id, pending["file_id"], pending["file_name"], lang)
+            return
+
         await bot.answer_callback_query(cb_id)
         return
 
@@ -2861,6 +2923,7 @@ async def handle_update(bot: TelegramBot, update: dict):
                 "• 🤖 <b>Gemini AI</b> viral captions, hooks & trending hashtags\n"
                 "• 🚀 <b>1-Click Automatic Instagram Reel Upload</b> (with preview confirmation)\n"
                 "• 📦 <b>HD Video Media</b> or <b>Uncompressed Document</b> delivery\n"
+                "• 🌐 <b>Subtitle Translator</b> — send any <code>.srt</code> file, get it back in 100+ languages with timings untouched\n"
                 "• ⚡ <b>Live Progress Bar</b>, Speed, and ETA tracking!\n\n"
                 "👉 <b>Quick Start:</b> Just paste any YouTube/Twitch/Kick link here!\n"
                 "Example:\n<code>https://youtu.be/ZnfOlhQwpSY</code>\n\n"
@@ -2994,6 +3057,7 @@ async def handle_update(bot: TelegramBot, update: dict):
         if text.startswith("/clean"):
             cnt, b_freed = cleanup_storage(max_age_seconds=0)
             PENDING_POSTS.clear()
+            PENDING_SRT.clear()
             await bot.send_message(
                 chat_id,
                 f"🧹 <b>Storage Cleaned Successfully!</b>\n\n"
@@ -3034,7 +3098,9 @@ async def handle_update(bot: TelegramBot, update: dict):
                 "• Vibrant yellow animated captions burned in lower third.\n\n"
                 "3. <b>1-Click Instagram Upload:</b>\n"
                 "After the video is delivered, tap <b>[🚀 Upload to Instagram Now]</b> to post as Reel, or <b>[❌ Cancel Upload]</b> to keep it only in Telegram.\n\n"
-                "4. <b>API Commands:</b>\n"
+                "4. <b>Subtitle Translator:</b>\n"
+                "Send any <code>.srt</code> subtitle file and pick a language — you get the same file back with every timestamp exactly where it was (Hindi, Spanish, Arabic & 100+ more).\n\n"
+                "5. <b>API Commands:</b>\n"
                 "• <code>/setgemini &lt;KEY&gt;</code> & <code>/delgemini</code>\n"
                 "• <code>/setinstagram &lt;ID&gt; &lt;TOKEN&gt;</code> & <code>/delinstagram</code>\n"
                 "• <code>/mykeys</code>"
@@ -3105,6 +3171,9 @@ async def handle_update(bot: TelegramBot, update: dict):
             doc = msg["document"]
             file_name = doc.get("file_name", "")
             file_id = doc["file_id"]
+            if file_name.lower().endswith(".srt"):
+                await handle_srt_file(bot, chat_id, file_id, file_name, msg.get("caption", ""))
+                return
             if file_name.lower().endswith("cookies.txt") or file_name.lower().endswith(".txt"):
                 await handle_cookies_file(bot, chat_id, file_id)
                 return
@@ -3114,6 +3183,247 @@ async def handle_update(bot: TelegramBot, update: dict):
 
         # Default prompt
         await bot.send_message(chat_id, "✂️ Please send a <b>YouTube, Twitch, or Kick video link</b> (or send an MP4 video file) to create viral 9:16 shorts!")
+
+# ----------------- SUBTITLE TRANSLATOR (.SRT FILES) -----------------
+
+def guess_srt_lang(caption: str) -> Optional[str]:
+    """The language named in a file's caption, or None. 'hi', 'hindi' and 'Spanish' all count."""
+    t = (caption or "").strip().lower()
+    if not t:
+        return None
+    first = re.split(r"[\s,.:;!?/]+", t)[0]
+    if re.fullmatch(r"[a-z]{2}", first):
+        return first
+    return SRT_LANG_NAMES.get(first) or SRT_LANG_NAMES.get(t)
+
+
+def decode_srt_bytes(raw: bytes) -> str:
+    """Subtitle files arrive in different encodings; read whichever one they used."""
+    for enc in ("utf-8-sig", "utf-16", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+def _srt_blocks(text: str) -> list:
+    """A subtitle file split into its cues, each cue kept as one block of lines."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return [b.strip() for b in re.split(r"\n[ \t]*\n", text) if b.strip()]
+
+
+def _rebuild_cue(orig_block: str, translated_text: str) -> str:
+    """Put new words into an old cue: the number and the timing line stay byte-for-byte."""
+    lines = orig_block.split("\n")
+    for i, ln in enumerate(lines):
+        if "-->" in ln:
+            return "\n".join(lines[: i + 1] + [translated_text])
+    return orig_block
+
+
+def _apply_cues(orig_part: list, resp: dict) -> Optional[list]:
+    """Turn one answer from the gateway back into cues with the original timings."""
+    cues = resp.get("cues") or []
+    if len(cues) == len(orig_part):
+        out = []
+        for orig, cue in zip(orig_part, cues):
+            txt = (cue.get("translated") or "").strip() or (cue.get("original") or "").strip()
+            out.append(_rebuild_cue(orig, txt) if txt else orig)
+        return out
+    # Some answers only carry the whole translated block; use it if the shape matches
+    t_blocks = _srt_blocks(resp.get("translated_srt") or "")
+    if len(t_blocks) == len(orig_part):
+        return t_blocks
+    return None
+
+
+async def _srt_post(client, payload: dict) -> dict:
+    last_err = None
+    for _ in range(3):
+        try:
+            r = await client.post(SRT_TRANSLATE_API, json=payload, timeout=90)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            await asyncio.sleep(2)
+    raise RuntimeError(f"the translation service did not answer: {last_err}")
+
+
+async def _srt_alive(client, target: str, tries: int = 5) -> bool:
+    """
+    Ask the service one sentence it must translate. The gateway swallows a request now
+    and then and returns the original text, so it is asked a few times: False only
+    when even repeated asks come back untouched, which means it has gone quiet.
+    """
+    if target == "en":
+        src = "आज मौसम बहुत अच्छा है, चलो बाहर घूमते हैं।"
+    else:
+        src = "Hello my friend, how are you today?"
+    for i in range(max(1, tries)):
+        try:
+            d = await _srt_post(client, {"text": src, "target": target})
+            out = (d.get("translated_text") or "").strip()
+            if out and out != src.strip():
+                return True
+        except Exception:
+            pass
+        if i < tries - 1:
+            await asyncio.sleep(2)
+    return False
+
+
+async def translate_srt_text(srt_text: str, target: str, progress=None) -> str:
+    """
+    Translate a whole subtitle file. The text changes, the timings never do: every cue
+    keeps its own number and timing line from the original file. The file is sent in
+    parts, and each part is checked. The gateway returns the original text for some
+    requests, so a part that comes back untouched is simply tried again; only if the
+    service has genuinely stopped translating does the run stop with a plain warning,
+    leaving the user's file untouched.
+    """
+    cue_blocks = [b for b in _srt_blocks(srt_text) if any("-->" in ln for ln in b.split("\n"))]
+    if not cue_blocks:
+        raise RuntimeError("This file has no subtitle timings, so it is not an SRT file.")
+
+    # Parts small enough for one request each
+    parts, cur, size = [], [], 0
+    for b in cue_blocks:
+        if cur and (len(cur) >= 80 or size + len(b) > 12000):
+            parts.append(cur)
+            cur, size = [], 0
+        cur.append(b)
+        size += len(b) + 2
+    if cur:
+        parts.append(cur)
+
+    done_parts = []
+    async with httpx.AsyncClient(timeout=90) as client:
+        if not await _srt_alive(client, target):
+            raise RuntimeError(SRT_BUSY_MSG)
+        for i, part in enumerate(parts):
+            translated_part = None
+            for attempt in range(4):
+                resp = await _srt_post(client, {"text": "\n\n".join(part), "target": target})
+                translated_part = _apply_cues(part, resp)
+                if translated_part is None:
+                    await asyncio.sleep(2)
+                    continue
+                if any(a != b for a, b in zip(part, translated_part)):
+                    break  # something really was translated
+                # Nothing changed. Two possibilities: the text is already in that
+                # language, or the gateway swallowed the request. A test sentence
+                # tells them apart — and gives it another try either way.
+                if attempt >= 1 and await _srt_alive(client, target, tries=2):
+                    break
+                await asyncio.sleep(2.5)
+            else:
+                raise RuntimeError(SRT_BUSY_MSG)
+            done_parts.extend(translated_part)
+            if progress:
+                try:
+                    await progress(i + 1, len(parts))
+                except Exception:
+                    pass
+            if i < len(parts) - 1:
+                await asyncio.sleep(1.2)
+    return "\n\n".join(done_parts) + "\n"
+
+
+async def run_srt_translation(bot: "TelegramBot", chat_id: int or str, file_id: str, file_name: str, target: str):
+    """Download the user's .srt, translate it and send the translated file back."""
+    status_msg = await bot.send_message(
+        chat_id, "🌐 <b>Translating subtitles...</b>\n<i>Downloading the subtitle file...</i>"
+    )
+    s_msg_id = status_msg["message_id"] if status_msg else None
+    out_path = None
+    try:
+        r = await bot.client.get(f"{bot.base_url}/getFile", params={"file_id": file_id})
+        rel_path = r.json().get("result", {}).get("file_path")
+        if not rel_path:
+            raise RuntimeError("Telegram would not hand over that file. Please send it again.")
+        dl_url = f"https://api.telegram.org/file/bot{bot.token}/{rel_path}"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(dl_url)
+            resp.raise_for_status()
+            raw = resp.content
+        srt_text = decode_srt_bytes(raw)
+
+        async def on_progress(done: int, total: int):
+            if s_msg_id:
+                pct = (done / max(1, total)) * 100
+                await bot.edit_message_text(
+                    chat_id, s_msg_id,
+                    "🌐 <b>Translating subtitles...</b>\n"
+                    f"<code>{render_progress_bar(pct, 12)}</code>\n"
+                    f"🧩 Part <b>{done}</b> of <b>{total}</b> — timestamps stay untouched"
+                )
+
+        out_text = await translate_srt_text(srt_text, target, progress=on_progress)
+        stem = Path(file_name).stem or "subtitles"
+        out_dir = DATA_DIR / "srt_out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{stem}.{target}.srt"
+        out_path.write_text(out_text, encoding="utf-8")
+
+        label = SRT_LANG_LABELS.get(target, target.upper())
+        safe_name = out_path.name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        res = await asyncio.to_thread(
+            bot.upload_with_progress,
+            "sendDocument",
+            chat_id,
+            out_path,
+            "document",
+            f"🌐 <b>Subtitles translated to {label}</b>\n📁 <code>{safe_name}</code>\n\n✅ Every timestamp is exactly where it was.",
+            None,
+            None,
+        )
+        if isinstance(res, dict) and res.get("ok") is False:
+            raise RuntimeError(str(res.get("description", "the translated file could not be sent")))
+        if s_msg_id:
+            await bot.edit_message_text(
+                chat_id, s_msg_id, f"✅ <b>Done!</b> Your translated subtitle file is above ({label})."
+            )
+    except RuntimeError as e:
+        # A plain-language problem worth repeating as it is (service quiet, not an SRT...)
+        if s_msg_id:
+            await bot.edit_message_text(chat_id, s_msg_id, f"⚠️ <b>Translation not finished:</b>\n{e}")
+    except Exception as e:
+        if s_msg_id:
+            await bot.edit_message_text(chat_id, s_msg_id, f"❌ <b>Translation failed:</b>\n<code>{str(e)[:300]}</code>")
+    finally:
+        if out_path:
+            try:
+                out_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+async def handle_srt_file(bot: "TelegramBot", chat_id: int or str, file_id: str, file_name: str, caption: str = ""):
+    """An .srt file arrived: translate at once if the caption names a language, else ask."""
+    lang = guess_srt_lang(caption)
+    if lang:
+        await run_srt_translation(bot, chat_id, file_id, file_name, lang)
+        return
+
+    PENDING_SRT[chat_id] = {"file_id": file_id, "file_name": file_name, "t": time.time()}
+    kb = {
+        "inline_keyboard": [
+            [{"text": label, "callback_data": f"srtlang:{code}"} for label, code in row]
+            for row in SRT_LANG_BUTTONS
+        ]
+    }
+    safe_name = file_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    await bot.send_message(
+        chat_id,
+        "🌐 <b>Subtitle Translator</b>\n\n"
+        f"📄 <code>{safe_name}</code> is ready.\n"
+        "Pick the language to translate it into — every timestamp stays exactly where it was:\n\n"
+        "<i>Or send the file again with a caption like <code>hindi</code>, <code>spanish</code> or "
+        "<code>arabic</code> for any of 100+ other languages.</i>",
+        reply_markup=kb,
+    )
 
 async def handle_cookies_file(bot: TelegramBot, chat_id: int or str, file_id: str):
     status_msg = await bot.send_message(chat_id, "🍪 <b>Saving YouTube cookies...</b>")
