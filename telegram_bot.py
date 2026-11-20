@@ -442,11 +442,8 @@ def transcribe_clip_audio_with_gemini(audio_path: Path, gemini_key: str, clip_of
 
 def build_ass_subtitles(snippets: list, clip_start: float, clip_end: float, out_path: Path, gemini_key: str = ""):
     """
-    Builds vibrant bouncy ASS subtitles burned in the lower-middle portion of the 9:16 video.
-    Features:
-    - Primary Colour: Vibrant Yellow (&H0000F0FF)
-    - Outline: Crisp Black 6px border (&H00000000)
-    - Auto Hindi -> Hinglish transliteration so letters never break or produce missing font glyphs
+    Builds vibrant bouncy ASS subtitles burned in the lower area (MarginV=220) of the 9:16 video.
+    Splits long sentences into punchy 2-3 word chunks (viral Shorts/Reels style) so text is never cluttered.
     """
     ass_head = """[Script Info]
 ScriptType: v4.00+
@@ -456,8 +453,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Bounce,DejaVu Sans,Liberation Sans,Arial,sans-serif,62,&H0000F0FF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,6,1,2,40,40,360,1
-Style: Clean,DejaVu Sans,Liberation Sans,Arial,sans-serif,56,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,2,40,40,360,1
+Style: Bounce,DejaVu Sans,Liberation Sans,Arial,sans-serif,52,&H0000F0FF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,2,40,40,220,1
+Style: Clean,DejaVu Sans,Liberation Sans,Arial,sans-serif,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,0,2,40,40,220,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -477,18 +474,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     else:
         offset = clip_start
 
-    # Batch convert any remaining Hindi
+    # Batch convert any remaining Hindi to natural Hinglish
     active_snippets = batch_convert_snippets_to_hinglish(active_snippets, gemini_key=gemini_key)
 
     for snip in active_snippets:
         s_rel = max(0.0, snip.start - offset)
         e_rel = min(clip_end - clip_start, s_rel + snip.duration)
-        if e_rel - s_rel >= 0.2:
+        dur = e_rel - s_rel
+        if dur >= 0.2:
             raw_t = snip.text.replace("\n", " ").strip()
             clean_t = to_hinglish_if_hindi(raw_t)
-            clean_t = re.sub(r"[\{\}\\]", "", clean_t)
-            if clean_t:
-                events.append(f"Dialogue: 0,{to_ass_time(s_rel)},{to_ass_time(e_rel)},Bounce,,0,0,0,,{clean_t}")
+            clean_t = re.sub(r"[\{\}\\\/']", "", clean_t).strip().upper()
+            words = clean_t.split()
+            if not words:
+                continue
+
+            # Split into punchy 2-3 words per subtitle event
+            max_w = 3
+            chunks = [" ".join(words[i:i+max_w]) for i in range(0, len(words), max_w)]
+            chunk_dur = dur / len(chunks)
+
+            for i, chunk in enumerate(chunks):
+                c_s = s_rel + i * chunk_dur
+                c_e = min(clip_end - clip_start, c_s + chunk_dur)
+                if c_e - c_s >= 0.15:
+                    events.append(f"Dialogue: 0,{to_ass_time(c_s)},{to_ass_time(c_e)},Bounce,,0,0,0,,{chunk}")
 
     out_path.write_text(ass_head + "\n".join(events) + "\n", encoding="utf-8")
 
@@ -1645,36 +1655,29 @@ async def process_video_job(
             clip_out = job_dir / f"{clip_name}.mp4"
             cover_out = job_dir / f"{clip_name}.jpg"
 
-            # Build 9:16 FFmpeg video layout filter
-            if layout_setting == "blur":
-                vf = (
-                    f"split[a][b];"
-                    f"[a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=20:5,eq=brightness=-0.12[bg];"
-                    f"[b]scale={out_w}:-2:force_original_aspect_ratio=decrease[fg];"
-                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
-                )
+            # Build 9:16 FFmpeg video layout filter (Pro Shorts 70% Layout is default)
+            if layout_setting == "crop":
+                vf = f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h}"
             elif layout_setting == "zoom":
                 vf = (
                     f"split[a][b];"
                     f"[a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=25:5[bg];"
-                    f"[b]scale={out_w}:{int(out_h * 0.65)}:force_original_aspect_ratio=increase,crop={out_w}:{int(out_h * 0.65)}[fg];"
+                    f"[b]scale={out_w}:{int(out_h * 0.85)}:force_original_aspect_ratio=increase,crop={out_w}:{int(out_h * 0.85)}[fg];"
                     f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
                 )
-            elif layout_setting == "crop":
-                vf = f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h}"
-            else:  # gameplay or default
+            else:  # "blur", "gameplay" or default -> Pro Shorts Layout (70% screen height)
                 vf = (
                     f"split[a][b];"
-                    f"[a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=15:4[bg];"
-                    f"[b]scale={out_w}:-2[fg];"
-                    f"[bg][fg]overlay=0:(H-h)/2"
+                    f"[a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=25:5,eq=brightness=-0.15[bg];"
+                    f"[b]scale={out_w}:1350:force_original_aspect_ratio=increase,crop={out_w}:1350[fg];"
+                    f"[bg][fg]overlay=0:285"
                 )
 
             # Add Bold Hook Banner on top of video if style is enabled
             if style_setting != "none" and hook_text:
                 clean_hook = re.sub(r"[^a-zA-Z0-9\s!?'\-\.,]", "", hook_text).strip()
                 if clean_hook:
-                    vf += f",drawtext=text='{clean_hook}':fontcolor=black:fontsize=50:box=1:boxcolor=white@0.95:boxborderw=20:x=(w-text_w)/2:y={int(out_h * 0.15)}"
+                    vf += f",drawtext=text='{clean_hook}':fontcolor=black:fontsize=52:box=1:boxcolor=white@0.95:boxborderw=18:x=(w-text_w)/2:y=140"
 
             # Burn Spoken Dialogue Subtitles inside video
             ass_file = job_dir / f"subs_{idx}.ass"
@@ -1700,17 +1703,10 @@ async def process_video_job(
 
                 if clip_snippets:
                     try:
-                        srt_file = job_dir / f"subs_{idx}.srt"
-                        build_srt_subtitles(clip_snippets, c_start, c_end, srt_file, gemini_key=g_key)
-                        if srt_file.exists() and srt_file.stat().st_size > 20:
+                        build_ass_subtitles(clip_snippets, c_start, c_end, ass_file, gemini_key=g_key)
+                        if ass_file.exists() and ass_file.stat().st_size > 50:
                             has_subs = True
-                            srt_style = "Fontname=DejaVu Sans,Fontsize=24,PrimaryColour=&H0000F0FF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Alignment=2,MarginV=120"
-                            vf += f",subtitles=subs_{idx}.srt:force_style='{srt_style}'"
-                        else:
-                            build_ass_subtitles(clip_snippets, c_start, c_end, ass_file, gemini_key=g_key)
-                            if ass_file.exists() and ass_file.stat().st_size > 50:
-                                has_subs = True
-                                vf += f",ass=subs_{idx}.ass"
+                            vf += f",ass=subs_{idx}.ass"
                     except Exception as e:
                         print(f"[Subtitle Burning Error] {e}")
 
