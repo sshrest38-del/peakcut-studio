@@ -32,7 +32,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 META_DIR.mkdir(parents=True, exist_ok=True)
-CF_PAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Custom Styling to match PeakCut's modern dark UI
 st.markdown("""
