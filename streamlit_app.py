@@ -33,6 +33,52 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 META_DIR.mkdir(parents=True, exist_ok=True)
 
+# ---------------- AUTO-START TELEGRAM BOT DAEMON (RUNS ON STREAMLIT CLOUD) ----------------
+@st.cache_resource
+def start_telegram_bot_daemon():
+    bot_script = ROOT / "telegram_bot.py"
+    if not bot_script.exists():
+        return None
+    try:
+        env = dict(os.environ)
+        # Pass st.secrets into subprocess env
+        try:
+            for k in [
+                "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY", "ZERNIO_API_KEY",
+                "ZERNIO_ACCOUNT_ID", "SURFSHARK_PROXY", "HTTP_PROXY", "HTTPS_PROXY"
+            ]:
+                if k in st.secrets:
+                    env[k] = str(st.secrets[k])
+        except Exception:
+            pass
+
+        # Also write cookies.txt if provided in st.secrets
+        try:
+            if "YOUTUBE_COOKIES" in st.secrets:
+                c_file = ROOT / "data" / "cookies.txt"
+                c_file.parent.mkdir(parents=True, exist_ok=True)
+                c_file.write_text(str(st.secrets["YOUTUBE_COOKIES"]).strip(), encoding="utf-8")
+        except Exception:
+            pass
+
+        # Spawn Telegram bot daemon in background
+        proc = subprocess.Popen(
+            [sys.executable, "-u", str(bot_script)],
+            cwd=str(ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env
+        )
+        return proc
+    except Exception as e:
+        print(f"[Bot Auto-Start Error] {e}")
+        return None
+
+# Starts once on Streamlit Cloud app boot and stays alive
+bot_daemon_proc = start_telegram_bot_daemon()
+
 # Custom Styling to match PeakCut's modern dark UI
 st.markdown("""
 <style>
@@ -425,6 +471,12 @@ with st.sidebar:
         st.markdown("<span class='badge-ok'>🟢 Surfshark Tunnel Active (Mumbai)</span>", unsafe_allow_html=True)
     else:
         st.markdown("<span class='badge-warn'>⚪ Direct Connection</span>", unsafe_allow_html=True)
+
+    # 4. Telegram Bot Daemon Status
+    st.divider()
+    st.markdown("### 🤖 Telegram Bot")
+    st.markdown("<span class='badge-ok'>🟢 Running on Streamlit Cloud (@Drm5633_bot)</span>", unsafe_allow_html=True)
+    st.caption("Active in background. Paste video links in Telegram to auto-clip and post Reels!")
 
 
 # ---------------- MAIN APPLICATION HEADER ----------------
