@@ -73,21 +73,24 @@ USER_PREFS_FILE = DATA_DIR / "telegram_users.json"
 def get_js_runtime_args() -> list:
     """
     Locates or auto-downloads a JavaScript runtime (Node.js or Deno)
-    to solve YouTube's EJS / n challenge on video formats.
+    to solve YouTube's EJS / n challenge on video formats, and provides
+    mobile player client fallback (Android, iOS) that does not require JS solver.
     """
+    args = []
     deno_local = ROOT_DIR / "data" / "bin" / ("deno.exe" if sys.platform == "win32" else "deno")
     if deno_local.exists():
-        return ["--js-runtimes", f"deno:{deno_local}", "--remote-components", "ejs:github"]
-
-    deno_sys = shutil.which("deno")
-    if deno_sys:
-        return ["--js-runtimes", f"deno:{deno_sys}", "--remote-components", "ejs:github"]
-
-    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None)
-    if node_sys:
-        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
-
-    if sys.platform.startswith("linux"):
+        args.extend(["--js-runtimes", f"deno:{deno_local}"])
+    elif shutil.which("deno"):
+        args.extend(["--js-runtimes", f"deno:{shutil.which('deno')}"])
+    elif shutil.which("node"):
+        args.extend(["--js-runtimes", f"node:{shutil.which('node')}"])
+    elif shutil.which("nodejs"):
+        args.extend(["--js-runtimes", f"node:{shutil.which('nodejs')}"])
+    elif Path("/usr/bin/node").exists():
+        args.extend(["--js-runtimes", "node:/usr/bin/node"])
+    elif Path("/usr/bin/nodejs").exists():
+        args.extend(["--js-runtimes", "node:/usr/bin/nodejs"])
+    elif sys.platform.startswith("linux"):
         try:
             bin_dir = ROOT_DIR / "data" / "bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
@@ -96,16 +99,20 @@ def get_js_runtime_args() -> list:
                 print("[Auto-Install] Downloading portable Deno JS runtime for Linux...")
                 url = "https://github.com/denoland/deno/releases/download/v2.1.2/deno-x86_64-unknown-linux-gnu.zip"
                 import urllib.request, zipfile, io
-                resp = urllib.request.urlopen(url, timeout=30)
-                zf = zipfile.ZipFile(io.BytesIO(resp.read()))
-                zf.extract("deno", path=str(bin_dir))
-                os.chmod(str(deno_bin), 0o755)
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    zf = zipfile.ZipFile(io.BytesIO(resp.read()))
+                    zf.extract("deno", path=str(bin_dir))
+                    os.chmod(str(deno_bin), 0o755)
             if deno_bin.exists():
-                return ["--js-runtimes", f"deno:{deno_bin}", "--remote-components", "ejs:github"]
+                args.extend(["--js-runtimes", f"deno:{deno_bin}"])
         except Exception as e:
             print(f"[Deno Auto-Download Warning] {e}")
 
-    return ["--remote-components", "ejs:github"]
+    args.extend(["--remote-components", "ejs:github"])
+    # Pass player_client fallback: android and ios mobile endpoints do not require web JS challenges
+    args.extend(["--extractor-args", "youtube:player_client=android,ios,web"])
+    return args
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -125,21 +132,21 @@ def load_bot_config() -> dict:
     sec_file = ROOT_DIR / ".streamlit" / "secrets.toml"
     if sec_file.exists():
         try:
-            content = sec_file.read_text(encoding="utf-8")
-            for line in content.splitlines():
-                line = line.strip()
-                if "=" in line and not line.startswith("#"):
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip('"').strip("'")
-                    if k == "TELEGRAM_BOT_TOKEN" and not cfg.get("bot_token"):
-                        cfg["bot_token"] = v
-                    elif k == "GEMINI_API_KEY" and not cfg.get("gemini_keys"):
-                        cfg["gemini_keys"] = v
-                    elif k == "ZERNIO_API_KEY" and not cfg.get("zernio_api_key"):
-                        cfg["zernio_api_key"] = v
-                    elif k == "ZERNIO_ACCOUNT_ID" and not cfg.get("zernio_account_id"):
-                        cfg["zernio_account_id"] = v
+            import tomllib
+            with open(sec_file, "rb") as sf:
+                sec_dict = tomllib.load(sf)
+                if sec_dict.get("TELEGRAM_BOT_TOKEN") and not cfg.get("bot_token"):
+                    cfg["bot_token"] = sec_dict["TELEGRAM_BOT_TOKEN"]
+                if sec_dict.get("GEMINI_API_KEY") and not cfg.get("gemini_keys"):
+                    cfg["gemini_keys"] = sec_dict["GEMINI_API_KEY"]
+                if sec_dict.get("ZERNIO_API_KEY") and not cfg.get("zernio_api_key"):
+                    cfg["zernio_api_key"] = sec_dict["ZERNIO_API_KEY"]
+                if sec_dict.get("ZERNIO_ACCOUNT_ID") and not cfg.get("zernio_account_id"):
+                    cfg["zernio_account_id"] = sec_dict["ZERNIO_ACCOUNT_ID"]
+                if sec_dict.get("YOUTUBE_COOKIES"):
+                    c_file = DATA_DIR / "cookies.txt"
+                    if not c_file.exists() or c_file.stat().st_size < 20:
+                        c_file.write_text(sec_dict["YOUTUBE_COOKIES"].strip(), encoding="utf-8")
         except Exception:
             pass
 
@@ -1347,6 +1354,18 @@ async def process_video_job(
 
         if not is_local_file:
             cookies_file = DATA_DIR / "cookies.txt"
+            if not cookies_file.exists() or cookies_file.stat().st_size < 20:
+                sec_file = ROOT_DIR / ".streamlit" / "secrets.toml"
+                if sec_file.exists():
+                    try:
+                        import tomllib
+                        with open(sec_file, "rb") as sf:
+                            sec_dict = tomllib.load(sf)
+                            if sec_dict.get("YOUTUBE_COOKIES"):
+                                cookies_file.write_text(sec_dict["YOUTUBE_COOKIES"].strip(), encoding="utf-8")
+                    except Exception:
+                        pass
+
             has_cookies = cookies_file.exists() and cookies_file.stat().st_size > 20
 
             # Direct fast extraction with socket timeout
@@ -1358,14 +1377,14 @@ async def process_video_job(
             tunnel_proxy = ensure_pproxy_tunnel()
             if tunnel_proxy:
                 base_dl_args.extend(["--proxy", tunnel_proxy])
-            elif not is_local_file:
+            else:
                 bot_cfg = load_bot_config()
                 pxy = bot_cfg.get("proxy", "").strip()
                 if pxy and ("surfshark.com" not in pxy.lower()) and pxy.startswith("http"):
                     base_dl_args.extend(["--proxy", pxy])
 
             base_dl_args.extend(get_js_runtime_args())
-            if has_cookies and not tunnel_proxy:
+            if has_cookies:
                 base_dl_args.extend(["--cookies", str(cookies_file)])
 
             await update_status("🔍 <b>Connecting to High-Speed Stream Extractor...</b>\n<code>Analyzing video stream and subtitles...</code>", force=True)
@@ -1397,7 +1416,7 @@ async def process_video_job(
             dl_cmd = [
                 sys.executable, "-m", "yt_dlp",
                 *base_dl_args,
-                "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18",
+                "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/b",
                 "--merge-output-format", "mp4",
                 "--write-auto-sub", "--write-sub",
                 "--sub-lang", "hi-orig,hi,en-orig,en",
