@@ -1944,6 +1944,7 @@ async def process_video_job(
                 "--write-auto-sub", "--write-sub",
                 "--sub-lang", "hi-orig,hi,en-orig,en",
                 "--sub-format", "json3",
+                "--no-abort-on-error",
                 "-o", str(raw_source_file),
                 "--newline",
                 source_url_or_path
@@ -2027,9 +2028,6 @@ async def process_video_job(
                         "--extractor-args", "youtube:player_client=tv_embedded,tv,visionos",
                         "-f", "bv*[height<=1080]+ba/b[height<=1080]/best",
                         "--merge-output-format", "mp4",
-                        "--write-auto-sub", "--write-sub",
-                        "--sub-lang", "hi-orig,hi,en-orig,en",
-                        "--sub-format", "json3",
                         "-o", str(raw_source_file),
                         "--newline",
                         source_url_or_path
