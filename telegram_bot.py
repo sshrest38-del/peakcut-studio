@@ -29,6 +29,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+# Force direct connections by default to prevent dead proxies from killing Telegram/APIs
+for _env_k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+    os.environ.pop(_env_k, None)
+
 import httpx
 import requests
 
@@ -98,7 +102,7 @@ def load_bot_config() -> dict:
     _FALLBACK_GEMINI_KEY = base64.b64decode("QVEuQWI4Uk42TEw2UE83dzVMZ09GYW12eTMzcE45cWlUaG5xRnVjNkoyVHFQM0RQWXU0VGc=").decode()
     _FALLBACK_ZERNIO_KEY = base64.b64decode("c2tfYTM5OWMwOWFkNTk2NmU2NzY4ZTI5N2VlMTJiYTBhODg4NjdhMTZjZGMxYzVjMjc5ZTg2Yjk3M2Y1YjFiMDIyMQ==").decode()
     _FALLBACK_ZERNIO_ACC = "6affe7338ae0a5730bcf4ec4"
-    _FALLBACK_PROXY = "http://9wPLNgvh3BzX7Bp4AhkMVcamark:G7YDFVncQSzp6SENwjJAS2Mu@in-mum.prod.surfshark.com:80"
+    _FALLBACK_PROXY = ""
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("bot_token") or _FALLBACK_BOT_TOKEN
     gemini_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or cfg.get("gemini_keys") or _FALLBACK_GEMINI_KEY
@@ -709,7 +713,7 @@ async def post_to_instagram_reel(
         "share_to_feed": "true"
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
         try:
             r1 = await client.post(init_url, params=init_params, headers=headers)
             res1 = r1.json()
@@ -797,7 +801,7 @@ async def post_to_zernio_reel(
         "Content-Type": "application/json"
     }
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
         try:
             # Step 1: Request presigned upload URL
             if status_callback:
@@ -871,8 +875,9 @@ class TelegramBot:
     def __init__(self, token: str):
         self.token = token
         self.base_url = f"https://api.telegram.org/bot{token}"
-        self.client = httpx.AsyncClient(timeout=60.0)
+        self.client = httpx.AsyncClient(timeout=60.0, trust_env=False)
         self.session = requests.Session()
+        self.session.trust_env = False
 
     async def get_me(self) -> dict:
         r = await self.client.get(f"{self.base_url}/getMe")
@@ -1136,7 +1141,7 @@ async def download_via_desi_api(url: str, dest_file: Path, progress_callback=Non
     api_endpoint = f"https://sheffysamra1bot-yt-api.smpost-tempmail.workers.dev/?url={url}&type=video"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
+        async with httpx.AsyncClient(timeout=25.0, trust_env=False) as client:
             r = await client.get(api_endpoint)
             if r.status_code != 200:
                 return None
@@ -2425,19 +2430,24 @@ async def main():
 
     bot = TelegramBot(token)
 
-    try:
-        me = await bot.get_me()
-        if not me.get("ok"):
-            print(f"[Error] Invalid Bot Token: {me}")
-            sys.exit(1)
-        bot_user = me["result"]
-        print(f"🤖 Bot Connected Successfully: @{bot_user['username']} ({bot_user['first_name']})")
-        print(f"📁 Work Directory: {ROOT_DIR}")
-        print(f"🔑 Gemini Keys: {len(get_gemini_keys())} configured")
-        print("🚀 Long-polling started. Listening for incoming messages...\n")
-    except Exception as e:
-        print(f"[Connection Error] Could not connect to Telegram API: {e}")
-        sys.exit(1)
+    retry_count = 0
+    while True:
+        try:
+            me = await bot.get_me()
+            if me and me.get("ok"):
+                bot_user = me["result"]
+                print(f"🤖 Bot Connected Successfully: @{bot_user['username']} ({bot_user['first_name']})")
+                print(f"📁 Work Directory: {ROOT_DIR}")
+                print(f"🔑 Gemini Keys: {len(get_gemini_keys())} configured")
+                print("🚀 Long-polling started. Listening for incoming messages...\n")
+                break
+            else:
+                print(f"[Error] Telegram getMe error: {me}. Retrying in 5s...")
+                await asyncio.sleep(5)
+        except Exception as e:
+            retry_count += 1
+            print(f"[Connection Attempt {retry_count}] Could not connect to Telegram API ({e}). Retrying in 5s...")
+            await asyncio.sleep(5)
 
     offset = 0
     while True:
