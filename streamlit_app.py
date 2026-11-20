@@ -167,7 +167,21 @@ def ensure_pproxy_tunnel() -> Optional[str]:
             return "http://127.0.0.1:8125"
     except Exception as e:
         print(f"[PProxy Warning] Could not start pproxy tunnel: {e}")
+
+    # A tunnel left over from an earlier run may already hold the port, which makes a new one
+    # exit at once. If something is answering there, that is the tunnel: use it rather than
+    # quietly going out without the VPN, which is what YouTube refuses.
+    if _tunnel_listening():
+        return "http://127.0.0.1:8125"
     return None
+
+
+def _tunnel_listening(port: int = 8125) -> bool:
+    """True if something is already serving the local tunnel port."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 class BotDaemonManager:
     _proc = None

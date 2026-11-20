@@ -1734,7 +1734,22 @@ def ensure_pproxy_tunnel() -> Optional[str]:
             print(f"[PProxy Exit Error] Process exited with code {_PPROXY_PROC.poll()}")
     except Exception as e:
         print(f"[PProxy Warning] Could not start pproxy tunnel: {e}")
+
+    # A tunnel left over from an earlier run may already hold the port, which makes a new one
+    # exit at once. If something is answering there, that is the tunnel: use it rather than
+    # quietly going out without the VPN, which is what YouTube refuses.
+    if _tunnel_listening():
+        print("[PProxy Tunnel Active] Reusing the tunnel already listening on 127.0.0.1:8125")
+        return "http://127.0.0.1:8125"
     return None
+
+
+def _tunnel_listening(port: int = 8125) -> bool:
+    """True if something is already serving the local tunnel port."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 # ----------------- VIDEO PROCESSING PIPELINE -----------------
 
@@ -1807,28 +1822,40 @@ async def process_video_job(
             if has_cookies:
                 print(f"[YouTube Cookies Active] Using {cookies_file} ({cookies_file.stat().st_size} bytes)")
 
-            # Everything below must be true of every attempt: cookies, a JavaScript runtime for
-            # YouTube's challenges, TLS impersonation and the personal proxy if one is set.
-            # The player client is chosen separately, because the iOS fallback overrides it.
-            base_dl_args = [
+            # Everything every attempt shares: a JavaScript runtime for YouTube's challenges and
+            # TLS impersonation. Cookies, the player client and the proxy are picked per attempt,
+            # because the iOS fallback needs a different mix of them.
+            common_args = [
                 "--no-check-certificates",
                 "--socket-timeout", "20",
             ]
             try:
                 import curl_cffi
-                base_dl_args.extend(["--impersonate", "chrome"])
+                common_args.extend(["--impersonate", "chrome"])
             except ImportError:
                 pass
+            common_args.extend(get_js_runtime_args())
 
-            # Only use proxy if user explicitly configured personal proxy (NOT forced Surfshark)
-            bot_cfg = load_bot_config()
-            pxy = bot_cfg.get("proxy", "").strip()
-            if pxy and ("surfshark.com" not in pxy.lower()) and pxy.startswith("http"):
-                base_dl_args.extend(["--proxy", pxy])
+            # A personal proxy (never the forced Surfshark one) goes on the attempts that leave
+            # straight from this machine. The VPN tunnel is used only by the attempts that go
+            # without cookies: cookies belong to the address they were exported from, and
+            # YouTube rejects them when they arrive from the tunnel's address instead. The
+            # tunnel is what gets around "sign in to confirm you're not a bot" when this
+            # machine's own address is refused.
+            pxy = load_bot_config().get("proxy", "").strip()
+            if not (pxy and pxy.startswith("http") and "surfshark.com" not in pxy.lower()):
+                pxy = ""
+            base_dl_args = common_args + (["--proxy", pxy] if pxy else [])
 
-            base_dl_args.extend(get_js_runtime_args())
-            if has_cookies:
-                base_dl_args.extend(["--cookies", str(cookies_file)])
+            tunnel_args = None
+            tunnel = ensure_pproxy_tunnel()
+            if tunnel:
+                tunnel_args = common_args + ["--proxy", tunnel]
+
+            # Cookies are given to the attempts that can use them. The iOS client ignores them
+            # and yt-dlp drops it from the list when they are passed, which leaves a download
+            # with no video formats at all ("Only images are available").
+            cookie_args = ["--cookies", str(cookies_file)] if has_cookies else []
 
             # Match client to authentication: web client for web cookies
             client_args = ["--extractor-args",
@@ -1841,6 +1868,7 @@ async def process_video_job(
                     cmd = [
                         sys.executable, "-m", "yt_dlp",
                         *base_dl_args,
+                        *cookie_args,
                         *client_args,
                         "--no-warnings",
                         "--print", "title",
@@ -1866,6 +1894,7 @@ async def process_video_job(
             dl_cmd = [
                 sys.executable, "-m", "yt_dlp",
                 *base_dl_args,
+                *cookie_args,
                 *client_args,
                 # the height cap matters in the first choice too: without it yt-dlp picks the
                 # biggest mp4 on the page (1440p and up), which is slow and often fails
@@ -1896,9 +1925,12 @@ async def process_video_job(
                 if not line:
                     break
                 line_str = line.decode('utf-8', errors='ignore')
-                dl_err_lines.append(line_str.strip())
-                if len(dl_err_lines) > 25:
-                    dl_err_lines.pop(0)
+                # only the lines that explain a failure are kept: progress lines would push the
+                # useful ones out of the small window
+                if any(k in line_str for k in ("ERROR", "WARNING", "Sign in", "TransportError")):
+                    dl_err_lines.append(line_str.strip())
+                    if len(dl_err_lines) > 25:
+                        dl_err_lines.pop(0)
 
                 p_m = pct_reg.search(line_str)
                 if p_m:
@@ -1923,51 +1955,61 @@ async def process_video_job(
 
             await process.wait()
 
-            # ATTEMPT 2: Fallback to iOS Native Client (Immune to SABR & 403 Forbidden)
+            # ATTEMPT 2: the iOS client, which needs no proof-of-token. Cookies are left out on
+            # purpose: yt-dlp drops the iOS client when they are passed, and with no client left
+            # the download has no video formats at all ("Only images are available"). The JS
+            # runtime and impersonation are kept, so YouTube's challenges still get solved. The
+            # same try is made through the tunnel and then straight from this machine, so a
+            # broken tunnel cannot end the job on its own.
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
-                await update_status(
-                    "🔄 <b>Retrying with High-Speed iOS Stream Engine...</b>\n"
-                    "<i>Bypassing SABR streaming & 403 Forbidden with iOS stream...</i>",
-                    force=True
-                )
-                alt_dl_cmd = [
-                    sys.executable, "-m", "yt_dlp",
-                    *base_dl_args,
-                    # Same cookies, JS runtime and proxy as above; only the client changes. Without
-                    # them this attempt produces "n challenge solving failed" and
-                    # "Sign in to confirm you're not a bot" instead of a video.
-                    "--extractor-args", "youtube:player_client=ios,mweb",
-                    "-f", "b[ext=mp4]/best[height<=1080]/best/18/b",
-                    "--merge-output-format", "mp4",
-                    "-o", str(raw_source_file),
-                    "--newline",
-                    source_url_or_path
-                ]
-                proc2 = await asyncio.create_subprocess_exec(
-                    *alt_dl_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT
-                )
-                while True:
-                    line2 = await proc2.stdout.readline()
-                    if not line2:
+                variants = [(tunnel_args, "through the VPN tunnel")] if tunnel_args else []
+                variants.append((base_dl_args, "straight from this machine"))
+                for v_args, where in variants:
+                    if raw_source_file.exists() and raw_source_file.stat().st_size > 0:
                         break
-                    l_str = line2.decode('utf-8', errors='ignore')
-                    dl_err_lines.append(l_str.strip())
-                    p_m2 = pct_reg.search(l_str)
-                    if p_m2:
-                        p_val = float(p_m2.group(1))
-                        s_m = spd_reg.search(l_str)
-                        e_m = eta_reg.search(l_str)
-                        sz_m = size_reg.search(l_str)
-                        status_text = (
-                            f"📥 <b>Downloading YouTube Video (Mobile Stream)...</b>\n"
-                            f"<code>{render_progress_bar(p_val, 12)}</code>\n"
-                            f"⚡ <b>Speed:</b> {s_m.group(1) if s_m else 'N/A'} | ⏳ <b>ETA:</b> {e_m.group(1) if e_m else 'N/A'}\n"
-                            f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
-                        )
-                        await update_status(status_text)
-                await proc2.wait()
+                    await update_status(
+                        "🔄 <b>Retrying with High-Speed iOS Stream Engine...</b>\n"
+                        f"<i>Trying the iOS stream {where}...</i>",
+                        force=True
+                    )
+                    alt_dl_cmd = [
+                        sys.executable, "-m", "yt_dlp",
+                        *v_args,
+                        "--extractor-args", "youtube:player_client=ios,mweb",
+                        "-f", "b[ext=mp4]/best[height<=1080]/best/18/b",
+                        "--merge-output-format", "mp4",
+                        "-o", str(raw_source_file),
+                        "--newline",
+                        source_url_or_path
+                    ]
+                    proc2 = await asyncio.create_subprocess_exec(
+                        *alt_dl_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT
+                    )
+                    while True:
+                        line2 = await proc2.stdout.readline()
+                        if not line2:
+                            break
+                        l_str = line2.decode('utf-8', errors='ignore')
+                        if any(k in l_str for k in ("ERROR", "WARNING", "Sign in", "TransportError")):
+                            dl_err_lines.append(l_str.strip())
+                            if len(dl_err_lines) > 25:
+                                dl_err_lines.pop(0)
+                        p_m2 = pct_reg.search(l_str)
+                        if p_m2:
+                            p_val = float(p_m2.group(1))
+                            s_m = spd_reg.search(l_str)
+                            e_m = eta_reg.search(l_str)
+                            sz_m = size_reg.search(l_str)
+                            status_text = (
+                                f"📥 <b>Downloading YouTube Video (Mobile Stream)...</b>\n"
+                                f"<code>{render_progress_bar(p_val, 12)}</code>\n"
+                                f"⚡ <b>Speed:</b> {s_m.group(1) if s_m else 'N/A'} | ⏳ <b>ETA:</b> {e_m.group(1) if e_m else 'N/A'}\n"
+                                f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
+                            )
+                            await update_status(status_text)
+                    await proc2.wait()
 
             # ATTEMPT 3: If still not downloaded, fallback to Cloudflare Workers Desi API
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
@@ -1998,6 +2040,7 @@ async def process_video_job(
                     subprocess.run([
                         sys.executable, "-m", "yt_dlp",
                         *base_dl_args,
+                        *cookie_args,
                         "--skip-download",
                         "--write-auto-sub", "--write-sub",
                         "--sub-lang", "hi-orig,hi,en-orig,en",
@@ -2018,7 +2061,7 @@ async def process_video_job(
                 all_snippets = load_subtitles_from_json3(chosen_sub)
 
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
-                recent_err = "\n".join([x for x in dl_err_lines if "ERROR:" in x or "WARNING:" in x or "Sign in" in x or "TransportError" in x][-3:])
+                recent_err = "\n".join([x for x in dl_err_lines if "ERROR:" in x or "WARNING:" in x or "Sign in" in x or "TransportError" in x][-6:])
                 fail_text = (
                     f"❌ <b>Download Error Encountered:</b>\n\n"
                     f"<code>{recent_err or 'No media streams found.'}</code>\n\n"
