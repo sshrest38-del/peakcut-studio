@@ -46,6 +46,16 @@ def ensure_pproxy_tunnel() -> Optional[str]:
     if _PPROXY_PROC is not None and _PPROXY_PROC.poll() is None:
         return "http://127.0.0.1:8125"
 
+    # Auto-install pproxy if missing in the environment
+    try:
+        import pproxy
+    except ImportError:
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "pproxy"], capture_output=True, timeout=60)
+            import pproxy
+        except Exception:
+            pass
+
     upstream = os.environ.get("SURFSHARK_PROXY", "").strip()
     if not upstream and hasattr(st, "secrets") and "SURFSHARK_PROXY" in st.secrets:
         upstream = str(st.secrets["SURFSHARK_PROXY"]).strip()
@@ -61,17 +71,20 @@ def ensure_pproxy_tunnel() -> Optional[str]:
             upstream = f"http+ssl://{h}:{pt}#{u}:{p}"
 
     try:
+        p_log = DATA_DIR / "pproxy.log"
+        p_out = open(p_log, "a", encoding="utf-8")
         cmd = [
             sys.executable, "-m", "pproxy",
             "-l", "http://127.0.0.1:8125",
-            "-r", upstream
+            "-r", upstream,
+            "-v"
         ]
         _PPROXY_PROC = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=p_out,
+            stderr=p_out
         )
-        time.sleep(0.8)
+        time.sleep(1.2)
         if _PPROXY_PROC.poll() is None:
             return "http://127.0.0.1:8125"
     except Exception as e:
