@@ -363,8 +363,6 @@ def batch_convert_snippets_to_hinglish(snippets: list, gemini_key: str = "") -> 
 
     if gemini_key:
         try:
-            from google import genai
-            client = genai.Client(api_key=gemini_key)
             prompt = (
                 "You are an expert Indian subtitle transliterator.\n"
                 "Convert each numbered Hindi dialogue line into natural, high-energy Roman Hinglish (English alphabet only, ALL CAPS).\n"
@@ -372,11 +370,15 @@ def batch_convert_snippets_to_hinglish(snippets: list, gemini_key: str = "") -> 
                 "Output one line per number in format 'ID: HINGLISH_TEXT'. Keep IDs exact.\n\n"
                 + "\n".join(f"{idx}: {txt}" for idx, txt in hindi_items[:40])
             )
-            for m_name in ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-flash-latest"]:
+            body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+            for m_name in ["gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-3-flash-preview"]:
                 try:
-                    resp = client.models.generate_content(model=m_name, contents=prompt)
-                    if resp and resp.text:
-                        for line in resp.text.splitlines():
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={gemini_key}"
+                    r = httpx.post(url, json=body, timeout=12)
+                    if r.status_code == 200:
+                        data = r.json()
+                        resp_text = data["candidates"][0]["content"]["parts"][0]["text"]
+                        for line in resp_text.splitlines():
                             line = line.strip()
                             if ":" in line:
                                 p0, p1 = line.split(":", 1)
@@ -388,6 +390,7 @@ def batch_convert_snippets_to_hinglish(snippets: list, gemini_key: str = "") -> 
                 except Exception:
                     continue
         except Exception as e:
+            print(f"[Gemini Hinglish Error] {e}")
             print(f"[Gemini Hinglish Error] {e}")
 
     for s in snippets:
@@ -453,8 +456,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Bounce,Arial,62,&H0000F0FF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,6,1,2,40,40,360,1
-Style: Clean,Arial,56,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,2,40,40,360,1
+Style: Bounce,DejaVu Sans,Liberation Sans,Arial,sans-serif,62,&H0000F0FF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,6,1,2,40,40,360,1
+Style: Clean,DejaVu Sans,Liberation Sans,Arial,sans-serif,56,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,2,40,40,360,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -621,7 +624,7 @@ Return ONLY a strict JSON object with a single key 'clips' containing an array o
         "generationConfig": {"temperature": 0.5, "responseMimeType": "application/json"}
     }
 
-    models_to_try = ["gemini-flash-latest", "gemini-3.1-flash-image", "gemini-3.8-flash"]
+    models_to_try = ["gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-flash-latest"]
 
     for active_key in keys:
         for model in models_to_try:
@@ -681,7 +684,7 @@ def generate_ai_viral_meta(clip_path: Path, prompt_context: str = "", gemini_key
             pass
 
     if keys and img_b64:
-        models_to_try = ["gemini-3.1-flash-image", "gemini-flash-latest", "gemini-3.8-flash"]
+        models_to_try = ["gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-flash-latest"]
         for active_key in keys:
             for model in models_to_try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={active_key}"
@@ -1457,14 +1460,11 @@ async def process_video_job(
             await process.wait()
 
             # Automatically parse downloaded json3 subtitles
-            sub_candidates = list(job_dir.glob("raw_video.*.json3"))
+            sub_candidates = list(job_dir.glob("*.json3"))
             chosen_sub = None
-            for s_f in sub_candidates:
-                if ".hi-orig." in s_f.name or ".hi." in s_f.name:
-                    chosen_sub = s_f
-                    break
-            if not chosen_sub and sub_candidates:
-                chosen_sub = sub_candidates[0]
+            for s_f in sorted(sub_candidates, key=lambda p: (0 if "hi" in p.name.lower() else (1 if "en" in p.name.lower() else 2))):
+                chosen_sub = s_f
+                break
 
             if chosen_sub:
                 all_snippets = load_subtitles_from_json3(chosen_sub)
@@ -1516,14 +1516,11 @@ async def process_video_job(
         clip_meta_list = []
 
         if not all_snippets:
-            sub_candidates = list(job_dir.glob("raw_video.*.json3"))
+            sub_candidates = list(job_dir.glob("*.json3"))
             chosen_sub = None
-            for s_f in sub_candidates:
-                if ".hi-orig." in s_f.name or ".hi." in s_f.name:
-                    chosen_sub = s_f
-                    break
-            if not chosen_sub and sub_candidates:
-                chosen_sub = sub_candidates[0]
+            for s_f in sorted(sub_candidates, key=lambda p: (0 if "hi" in p.name.lower() else (1 if "en" in p.name.lower() else 2))):
+                chosen_sub = s_f
+                break
             if chosen_sub:
                 all_snippets = load_subtitles_from_json3(chosen_sub)
 
@@ -1851,6 +1848,14 @@ async def process_video_job(
                     extra,
                     upload_progress
                 )
+
+            # Send clean 1-click tap-to-copy code block for Instagram Reel caption
+            copy_box = (
+                f"📋 <b>INSTAGRAM POST COPY (Tap to copy):</b>\n\n"
+                f"<code>{ig_caption}</code>\n\n"
+                f"✨ <i>Tip: Tap the box above to copy the complete caption & hashtags in 1 click!</i>"
+            )
+            await bot.send_message(chat_id, copy_box)
 
         # Update progress status message
         await bot.edit_message_text(
