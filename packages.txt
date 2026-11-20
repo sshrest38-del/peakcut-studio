@@ -1,2 +1,4 @@
 ffmpeg
 nodejs
+fonts-dejavu-core
+fonts-liberation
