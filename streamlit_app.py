@@ -35,6 +35,43 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 META_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------- AUTO-START TELEGRAM BOT DAEMON (RUNS ON STREAMLIT CLOUD) ----------------
+def get_js_runtime_args() -> list:
+    """
+    Locates or auto-downloads a JavaScript runtime (Node.js or Deno)
+    to solve YouTube's EJS / n challenge on video formats.
+    """
+    deno_local = ROOT / "data" / "bin" / ("deno.exe" if sys.platform == "win32" else "deno")
+    if deno_local.exists():
+        return ["--js-runtimes", f"deno:{deno_local}", "--remote-components", "ejs:github"]
+
+    deno_sys = shutil.which("deno")
+    if deno_sys:
+        return ["--js-runtimes", f"deno:{deno_sys}", "--remote-components", "ejs:github"]
+
+    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None)
+    if node_sys:
+        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
+
+    if sys.platform.startswith("linux"):
+        try:
+            bin_dir = ROOT / "data" / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            deno_bin = bin_dir / "deno"
+            if not deno_bin.exists():
+                print("[Auto-Install] Downloading portable Deno JS runtime for Linux...")
+                url = "https://github.com/denoland/deno/releases/download/v2.1.2/deno-x86_64-unknown-linux-gnu.zip"
+                import urllib.request, zipfile, io
+                resp = urllib.request.urlopen(url, timeout=30)
+                zf = zipfile.ZipFile(io.BytesIO(resp.read()))
+                zf.extract("deno", path=str(bin_dir))
+                os.chmod(str(deno_bin), 0o755)
+            if deno_bin.exists():
+                return ["--js-runtimes", f"deno:{deno_bin}", "--remote-components", "ejs:github"]
+        except Exception as e:
+            print(f"[Deno Auto-Download Warning] {e}")
+
+    return ["--remote-components", "ejs:github"]
+
 _PPROXY_PROC = None
 
 def ensure_pproxy_tunnel() -> Optional[str]:
@@ -702,6 +739,7 @@ with tab_clipper:
                         "--no-warnings",
                         "--force-overwrites",
                     ]
+                    ytdlp_cmd.extend(get_js_runtime_args())
                     if proxy_val:
                         ytdlp_cmd.extend(["--proxy", proxy_val])
                     elif cookies_file.exists() and cookies_file.stat().st_size > 10:
