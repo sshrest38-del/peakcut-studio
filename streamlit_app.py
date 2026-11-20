@@ -76,10 +76,16 @@ META_DIR.mkdir(parents=True, exist_ok=True)
 # ---------------- AUTO-START TELEGRAM BOT DAEMON (RUNS ON STREAMLIT CLOUD) ----------------
 def get_js_runtime_args() -> list:
     """
-    Locates or prepares a JavaScript runtime (QuickJS, Node.js or Deno)
+    Locates or prepares a JavaScript runtime (Node.js, QuickJS or Deno)
     to solve YouTube's EJS / n challenge on video formats.
+    Prioritizes system Node.js on Linux (installed via packages.txt).
     """
-    # 1. Bundled static QuickJS binary (fastest, standalone, 2.5MB in repo)
+    # 1. System Node.js (most stable on Debian/Ubuntu Linux Streamlit Cloud)
+    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None) or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None)
+    if node_sys:
+        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
+
+    # 2. Bundled static QuickJS binary
     qjs_bin = ROOT / "bin" / "qjs"
     if qjs_bin.exists():
         if sys.platform.startswith("linux"):
@@ -89,16 +95,10 @@ def get_js_runtime_args() -> list:
                 pass
         return ["--js-runtimes", f"quickjs:{qjs_bin}", "--remote-components", "ejs:github"]
 
-    # 2. Check system runtimes (Node.js or Deno)
-    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None) or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None)
-    if node_sys:
-        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
-
     deno_sys = shutil.which("deno")
     if deno_sys:
         return ["--js-runtimes", f"deno:{deno_sys}", "--remote-components", "ejs:github"]
 
-    # 3. Fallback: If no JS runtime is available, DO NOT pass ejs:github
     return []
 
 _PPROXY_PROC = None
