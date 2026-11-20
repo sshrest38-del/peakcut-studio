@@ -48,46 +48,30 @@ META_DIR.mkdir(parents=True, exist_ok=True)
 # ---------------- AUTO-START TELEGRAM BOT DAEMON (RUNS ON STREAMLIT CLOUD) ----------------
 def get_js_runtime_args() -> list:
     """
-    Locates or auto-downloads a JavaScript runtime (Node.js or Deno)
-    to solve YouTube's EJS / n challenge on video formats, and provides
-    mobile player client fallback (Android, iOS) that does not require JS solver.
+    Locates or prepares a JavaScript runtime (QuickJS, Node.js or Deno)
+    to solve YouTube's EJS / n challenge on video formats.
     """
-    args = []
-    deno_local = ROOT / "data" / "bin" / ("deno.exe" if sys.platform == "win32" else "deno")
-    if deno_local.exists():
-        args.extend(["--js-runtimes", f"deno:{deno_local}"])
-    elif shutil.which("deno"):
-        args.extend(["--js-runtimes", f"deno:{shutil.which('deno')}"])
-    elif shutil.which("node"):
-        args.extend(["--js-runtimes", f"node:{shutil.which('node')}"])
-    elif shutil.which("nodejs"):
-        args.extend(["--js-runtimes", f"node:{shutil.which('nodejs')}"])
-    elif Path("/usr/bin/node").exists():
-        args.extend(["--js-runtimes", "node:/usr/bin/node"])
-    elif Path("/usr/bin/nodejs").exists():
-        args.extend(["--js-runtimes", "node:/usr/bin/nodejs"])
-    elif sys.platform.startswith("linux"):
-        try:
-            bin_dir = ROOT / "data" / "bin"
-            bin_dir.mkdir(parents=True, exist_ok=True)
-            deno_bin = bin_dir / "deno"
-            if not deno_bin.exists():
-                print("[Auto-Install] Downloading portable Deno JS runtime for Linux...")
-                url = "https://github.com/denoland/deno/releases/download/v2.1.2/deno-x86_64-unknown-linux-gnu.zip"
-                import urllib.request, zipfile, io
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"})
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    zf = zipfile.ZipFile(io.BytesIO(resp.read()))
-                    zf.extract("deno", path=str(bin_dir))
-                    os.chmod(str(deno_bin), 0o755)
-            if deno_bin.exists():
-                args.extend(["--js-runtimes", f"deno:{deno_bin}"])
-        except Exception as e:
-            print(f"[Deno Auto-Download Warning] {e}")
+    # 1. Bundled static QuickJS binary (fastest, standalone, 2.5MB in repo)
+    qjs_bin = ROOT / "bin" / "qjs"
+    if qjs_bin.exists():
+        if sys.platform.startswith("linux"):
+            try:
+                os.chmod(str(qjs_bin), 0o755)
+            except Exception:
+                pass
+        return ["--js-runtimes", f"quickjs:{qjs_bin}", "--remote-components", "ejs:github"]
 
-    args.extend(["--remote-components", "ejs:github"])
-    args.extend(["--extractor-args", "youtube:player_client=android,ios,web"])
-    return args
+    # 2. Check system runtimes (Node.js or Deno)
+    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None) or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None)
+    if node_sys:
+        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
+
+    deno_sys = shutil.which("deno")
+    if deno_sys:
+        return ["--js-runtimes", f"deno:{deno_sys}", "--remote-components", "ejs:github"]
+
+    # 3. Fallback: If no JS runtime is available, DO NOT pass ejs:github
+    return []
 
 _PPROXY_PROC = None
 
@@ -205,10 +189,16 @@ class BotDaemonManager:
     def restart(cls):
         if cls._proc is not None:
             try:
-                cls._proc.terminate()
+                cls._proc.kill()
             except Exception:
                 pass
             cls._proc = None
+        if sys.platform.startswith("linux"):
+            try:
+                subprocess.run(["pkill", "-9", "-f", "telegram_bot.py"], capture_output=True)
+                time.sleep(0.5)
+            except Exception:
+                pass
         return cls.get_or_start()
 
 # Starts once on Streamlit Cloud app boot and self-heals if stopped
