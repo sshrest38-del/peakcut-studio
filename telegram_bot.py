@@ -47,6 +47,17 @@ try:
 except ImportError:
     unidecode = None
 
+# Auto-install essential runtime packages (pproxy and ytdlp-jsc) if missing
+for _pkg in ["pproxy", "ytdlp-jsc"]:
+    try:
+        __import__(_pkg.replace("-", "_"))
+    except ImportError:
+        try:
+            print(f"[Auto-Install] {_pkg} missing, installing via pip...")
+            subprocess.run([sys.executable, "-m", "pip", "install", _pkg], capture_output=True, timeout=60)
+        except Exception:
+            pass
+
 # Ensure PeakCut root is on sys.path
 ROOT_DIR = Path(__file__).parent.resolve()
 if str(ROOT_DIR) not in sys.path:
@@ -1338,11 +1349,10 @@ async def process_video_job(
             cookies_file = DATA_DIR / "cookies.txt"
             has_cookies = cookies_file.exists() and cookies_file.stat().st_size > 20
 
-            # Direct fast extraction with iOS/Android/Web player clients and socket timeout
+            # Direct fast extraction with socket timeout
             base_dl_args = [
                 "--no-check-certificates",
-                "--extractor-args", "youtube:player_client=ios,android,web,mweb",
-                "--socket-timeout", "15"
+                "--socket-timeout", "20"
             ]
             # Route downloads through Surfshark Mumbai HTTPS Proxy via local pproxy tunnel
             tunnel_proxy = ensure_pproxy_tunnel()
