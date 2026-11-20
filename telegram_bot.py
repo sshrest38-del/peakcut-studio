@@ -49,7 +49,7 @@ except ImportError:
     unidecode = None
 
 # Auto-install essential runtime packages if missing
-for _pkg in ["pproxy", "ytdlp-jsc", "imageio-ffmpeg"]:
+for _pkg in ["pproxy", "ytdlp-jsc", "imageio-ffmpeg", "curl-cffi"]:
     try:
         __import__(_pkg.replace("-", "_"))
     except ImportError:
@@ -1536,11 +1536,17 @@ async def process_video_job(
 
             has_cookies = cookies_file.exists() and cookies_file.stat().st_size > 20
 
-            # Direct fast extraction with socket timeout
+            # Direct fast extraction with anti-403 YouTube client settings
             base_dl_args = [
                 "--no-check-certificates",
-                "--socket-timeout", "20"
+                "--socket-timeout", "20",
+                "--extractor-args", "youtube:player_client=android,web"
             ]
+            try:
+                import curl_cffi
+                base_dl_args.extend(["--impersonate", "chrome"])
+            except ImportError:
+                pass
             # Route downloads through Surfshark Mumbai HTTPS Proxy via local pproxy tunnel
             tunnel_proxy = ensure_pproxy_tunnel()
             if tunnel_proxy:
