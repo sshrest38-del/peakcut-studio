@@ -691,7 +691,7 @@ with tab_clipper:
                     ]
                     if proxy_val:
                         ytdlp_cmd.extend(["--proxy", proxy_val])
-                    if cookies_file.exists() and cookies_file.stat().st_size > 10:
+                    elif cookies_file.exists() and cookies_file.stat().st_size > 10:
                         ytdlp_cmd.extend(["--cookies", str(cookies_file)])
                     ytdlp_cmd.append(active_source)
                     prog_bar.progress(0.3, text="Downloading video stream...")
