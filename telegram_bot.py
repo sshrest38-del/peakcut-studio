@@ -101,12 +101,16 @@ USER_PREFS_FILE = DATA_DIR / "telegram_users.json"
 
 def get_js_runtime_args() -> list:
     """
-    Locates or prepares a JavaScript runtime (QuickJS, Node.js or Deno)
+    Locates or prepares a JavaScript runtime (Node.js, QuickJS or Deno)
     to solve YouTube's EJS / n challenge on video formats.
+    Prioritizes system Node.js on Linux (installed via packages.txt).
     """
-    args = []
+    # 1. System Node.js (most stable on Debian/Ubuntu Linux Streamlit Cloud)
+    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None) or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None)
+    if node_sys:
+        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
 
-    # 1. Bundled static QuickJS binary (fastest, standalone, 2.5MB in repo)
+    # 2. Bundled static QuickJS binary
     qjs_bin = ROOT_DIR / "bin" / "qjs"
     if qjs_bin.exists():
         if sys.platform.startswith("linux"):
@@ -116,17 +120,10 @@ def get_js_runtime_args() -> list:
                 pass
         return ["--js-runtimes", f"quickjs:{qjs_bin}", "--remote-components", "ejs:github"]
 
-    # 2. Check system runtimes (Node.js or Deno)
-    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None) or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None)
-    if node_sys:
-        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
-
     deno_sys = shutil.which("deno")
     if deno_sys:
         return ["--js-runtimes", f"deno:{deno_sys}", "--remote-components", "ejs:github"]
 
-    # 3. Fallback: If no JS runtime is available, DO NOT pass ejs:github
-    # (Passing ejs:github without a JS engine causes yt-dlp to discard all video formats)
     return []
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1523,6 +1520,16 @@ async def process_video_job(
         if not is_local_file:
             cookies_file = DATA_DIR / "cookies.txt"
             if not cookies_file.exists() or cookies_file.stat().st_size < 20:
+                for c_cand in [ROOT_DIR / "cookies.txt", ROOT_DIR / "data" / "cookies.txt"]:
+                    if c_cand.exists() and c_cand.stat().st_size > 20:
+                        try:
+                            DATA_DIR.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(c_cand, cookies_file)
+                        except Exception:
+                            cookies_file = c_cand
+                        break
+
+            if not cookies_file.exists() or cookies_file.stat().st_size < 20:
                 sec_file = ROOT_DIR / ".streamlit" / "secrets.toml"
                 if sec_file.exists():
                     try:
@@ -1535,12 +1542,14 @@ async def process_video_job(
                         pass
 
             has_cookies = cookies_file.exists() and cookies_file.stat().st_size > 20
+            if has_cookies:
+                print(f"[YouTube Cookies Active] Using {cookies_file} ({cookies_file.stat().st_size} bytes)")
 
-            # Try direct high-speed connection with iOS/MWeb client (bypasses SABR & proxy 403 blocks)
+            # Match client to authentication: web client for web cookies
             base_dl_args = [
                 "--no-check-certificates",
                 "--socket-timeout", "20",
-                "--extractor-args", "youtube:player_client=ios,mweb,web"
+                "--extractor-args", "youtube:player_client=web,default" if has_cookies else "youtube:player_client=ios,mweb"
             ]
             try:
                 import curl_cffi
