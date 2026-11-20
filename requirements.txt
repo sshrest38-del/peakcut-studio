@@ -14,3 +14,4 @@ requests
 requests-toolbelt
 unidecode
 opencv-python-headless
+pproxy
