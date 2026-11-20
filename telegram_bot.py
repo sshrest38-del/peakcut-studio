@@ -1536,26 +1536,23 @@ async def process_video_job(
 
             has_cookies = cookies_file.exists() and cookies_file.stat().st_size > 20
 
-            # Direct fast extraction with web client (matched to cookies)
+            # Try direct high-speed connection with iOS/MWeb client (bypasses SABR & proxy 403 blocks)
             base_dl_args = [
                 "--no-check-certificates",
                 "--socket-timeout", "20",
-                "--extractor-args", "youtube:player_client=web,default"
+                "--extractor-args", "youtube:player_client=ios,mweb,web"
             ]
             try:
                 import curl_cffi
                 base_dl_args.extend(["--impersonate", "chrome"])
             except ImportError:
                 pass
-            # Route downloads through Surfshark Mumbai HTTPS Proxy via local pproxy tunnel
-            tunnel_proxy = ensure_pproxy_tunnel()
-            if tunnel_proxy:
-                base_dl_args.extend(["--proxy", tunnel_proxy])
-            else:
-                bot_cfg = load_bot_config()
-                pxy = bot_cfg.get("proxy", "").strip()
-                if pxy and ("surfshark.com" not in pxy.lower()) and pxy.startswith("http"):
-                    base_dl_args.extend(["--proxy", pxy])
+
+            # Only use proxy if user explicitly configured personal proxy (NOT forced Surfshark)
+            bot_cfg = load_bot_config()
+            pxy = bot_cfg.get("proxy", "").strip()
+            if pxy and ("surfshark.com" not in pxy.lower()) and pxy.startswith("http"):
+                base_dl_args.extend(["--proxy", pxy])
 
             base_dl_args.extend(get_js_runtime_args())
             if has_cookies:
@@ -1590,7 +1587,7 @@ async def process_video_job(
             dl_cmd = [
                 sys.executable, "-m", "yt_dlp",
                 *base_dl_args,
-                "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/b",
+                "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/b",
                 "--merge-output-format", "mp4",
                 "--write-auto-sub", "--write-sub",
                 "--sub-lang", "hi-orig,hi,en-orig,en",
@@ -1644,23 +1641,20 @@ async def process_video_job(
 
             await process.wait()
 
-            # ATTEMPT 2: Fallback to Android Native Extractor (Bypasses 403 Forbidden without cookies)
+            # ATTEMPT 2: Fallback to iOS Native Client (Immune to SABR & 403 Forbidden)
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
                 await update_status(
-                    "🔄 <b>Retrying with Mobile Stream Engine...</b>\n"
-                    "<i>Bypassing 403 Forbidden with direct stream extraction...</i>",
+                    "🔄 <b>Retrying with High-Speed iOS Stream Engine...</b>\n"
+                    "<i>Bypassing SABR streaming & 403 Forbidden with iOS stream...</i>",
                     force=True
                 )
                 alt_dl_cmd = [
                     sys.executable, "-m", "yt_dlp",
                     "--no-check-certificates",
                     "--socket-timeout", "20",
-                    "--extractor-args", "youtube:player_client=android",
-                    "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/b",
+                    "--extractor-args", "youtube:player_client=ios,mweb",
+                    "-f", "b[ext=mp4]/best[height<=1080]/best/18/b",
                     "--merge-output-format", "mp4",
-                    "--write-auto-sub", "--write-sub",
-                    "--sub-lang", "hi-orig,hi,en-orig,en",
-                    "--sub-format", "json3",
                     "-o", str(raw_source_file),
                     "--newline",
                     source_url_or_path
