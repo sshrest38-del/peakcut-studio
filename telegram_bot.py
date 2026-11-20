@@ -492,6 +492,43 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     out_path.write_text(ass_head + "\n".join(events) + "\n", encoding="utf-8")
 
+def build_srt_subtitles(snippets: list, clip_start: float, clip_end: float, out_path: Path, gemini_key: str = ""):
+    """
+    Builds clean, vibrant SRT subtitles burned in the lower-middle portion of the 9:16 video.
+    """
+    def to_srt_time(sec):
+        sec = max(0.0, sec)
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = int(sec % 60)
+        ms = int(round((sec - int(sec)) * 1000))
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    active_snippets = [s for s in snippets if s.start >= clip_start - 0.5 and s.start < clip_end]
+    if not active_snippets and snippets and snippets[0].start < 10.0:
+        active_snippets = [s for s in snippets if s.start < (clip_end - clip_start)]
+        offset = 0.0
+    else:
+        offset = clip_start
+
+    # Transliterate Hindi to Hinglish
+    active_snippets = batch_convert_snippets_to_hinglish(active_snippets, gemini_key=gemini_key)
+
+    entries = []
+    idx = 1
+    for snip in active_snippets:
+        s_rel = max(0.0, snip.start - offset)
+        e_rel = min(clip_end - clip_start, s_rel + snip.duration)
+        if e_rel - s_rel >= 0.2:
+            raw_t = snip.text.replace("\n", " ").strip()
+            clean_t = to_hinglish_if_hindi(raw_t)
+            clean_t = re.sub(r"[\{\}\\]", "", clean_t).strip().upper()
+            if clean_t:
+                entries.append(f"{idx}\n{to_srt_time(s_rel)} --> {to_srt_time(e_rel)}\n{clean_t}\n")
+                idx += 1
+
+    out_path.write_text("\n".join(entries), encoding="utf-8")
+
 # ----------------- VIRAL MOMENT DETECTION -----------------
 
 def find_viral_peaks_from_snippets(snippets: list, duration: float, clip_dur: int = 30, num_clips: int = 1) -> list:
@@ -1663,12 +1700,19 @@ async def process_video_job(
 
                 if clip_snippets:
                     try:
-                        build_ass_subtitles(clip_snippets, c_start, c_end, ass_file, gemini_key=g_key)
-                        if ass_file.exists() and ass_file.stat().st_size > 50:
+                        srt_file = job_dir / f"subs_{idx}.srt"
+                        build_srt_subtitles(clip_snippets, c_start, c_end, srt_file, gemini_key=g_key)
+                        if srt_file.exists() and srt_file.stat().st_size > 20:
                             has_subs = True
-                            vf += f",ass=subs_{idx}.ass"
+                            srt_style = "Fontname=DejaVu Sans,Fontsize=24,PrimaryColour=&H0000F0FF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Alignment=2,MarginV=120"
+                            vf += f",subtitles=subs_{idx}.srt:force_style='{srt_style}'"
+                        else:
+                            build_ass_subtitles(clip_snippets, c_start, c_end, ass_file, gemini_key=g_key)
+                            if ass_file.exists() and ass_file.stat().st_size > 50:
+                                has_subs = True
+                                vf += f",ass=subs_{idx}.ass"
                     except Exception as e:
-                        print(f"[ASS Subtitle Error] {e}")
+                        print(f"[Subtitle Burning Error] {e}")
 
             render_cmd = [
                 "ffmpeg", "-y",
@@ -2213,6 +2257,12 @@ async def handle_update(bot: TelegramBot, update: dict):
         if text.startswith("/settings"):
             pref = get_pref(chat_id)
             await bot.send_message(chat_id, "⚙️ <b>PeakCut Studio Settings Dashboard</b>\n<i>Choose your vertical layout, captions, and API keys:</i>", reply_markup=build_settings_keyboard(pref))
+            return
+
+        if text.startswith("/restart"):
+            await bot.send_message(chat_id, "🔄 <b>Restarting PeakCut Bot with latest code & subtitle engine...</b>\n<i>Reloading in 2 seconds!</i>")
+            await asyncio.sleep(1.2)
+            os.execv(sys.executable, [sys.executable, str(ROOT_DIR / "telegram_bot.py")])
             return
 
         # GEMINI API COMMANDS (PER-USER)
