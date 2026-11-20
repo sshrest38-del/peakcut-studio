@@ -52,7 +52,7 @@ class BotDaemonManager:
             try:
                 for k in [
                     "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY", "ZERNIO_API_KEY",
-                    "ZERNIO_ACCOUNT_ID", "SURFSHARK_PROXY"
+                    "ZERNIO_ACCOUNT_ID"
                 ]:
                     if k in st.secrets:
                         env[k] = str(st.secrets[k])
@@ -617,13 +617,10 @@ with tab_clipper:
                 if not uploaded_video_path:
                     logs.append("Fetching video stream with yt-dlp...")
                     status_box.info("\n".join(logs))
-                    # Check for Surfshark / Proxy
+                    # Check for Proxy (only use if not openvpn surfshark endpoint)
                     proxy_val = st.session_state.get("surfshark_proxy") or os.environ.get("SURFSHARK_PROXY") or os.environ.get("HTTP_PROXY") or ""
-                    try:
-                        if not proxy_val and "SURFSHARK_PROXY" in st.secrets:
-                            proxy_val = str(st.secrets["SURFSHARK_PROXY"])
-                    except Exception:
-                        pass
+                    if "surfshark.com" in proxy_val.lower():
+                        proxy_val = ""
                     
                     # Check for Netscape cookies
                     cookies_file = Path(__file__).parent / "data" / "cookies.txt"
@@ -636,7 +633,9 @@ with tab_clipper:
 
                     ytdlp_cmd = [
                         sys.executable, "-m", "yt_dlp",
-                        "-f", "ba/b[height<=720]/b",
+                        "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best/18",
+                        "--extractor-args", "youtube:player_client=ios,android,web,mweb",
+                        "--socket-timeout", "15",
                         "-o", str(source_file),
                         "--no-warnings",
                         "--force-overwrites",
