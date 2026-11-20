@@ -159,7 +159,7 @@ def ensure_pproxy_tunnel() -> Optional[str]:
 
 class BotDaemonManager:
     _proc = None
-    _code_ver = "v3.0.0"
+    _code_ver = "v5.1.0"
     _started_ver = None
 
     @classmethod
