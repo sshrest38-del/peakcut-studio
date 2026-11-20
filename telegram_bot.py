@@ -89,8 +89,6 @@ def load_bot_config() -> dict:
                         cfg["bot_token"] = v
                     elif k == "GEMINI_API_KEY" and not cfg.get("gemini_keys"):
                         cfg["gemini_keys"] = v
-                    elif k in ("SURFSHARK_PROXY", "HTTP_PROXY") and not cfg.get("proxy"):
-                        cfg["proxy"] = v
                     elif k == "ZERNIO_API_KEY" and not cfg.get("zernio_api_key"):
                         cfg["zernio_api_key"] = v
                     elif k == "ZERNIO_ACCOUNT_ID" and not cfg.get("zernio_account_id"):
@@ -106,7 +104,9 @@ def load_bot_config() -> dict:
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("bot_token") or _FALLBACK_BOT_TOKEN
     gemini_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or cfg.get("gemini_keys") or _FALLBACK_GEMINI_KEY
-    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("SURFSHARK_PROXY") or cfg.get("proxy") or _FALLBACK_PROXY
+    proxy = cfg.get("proxy", "")
+    if proxy and ("surfshark.com" in proxy.lower() or not proxy.startswith("http")):
+        proxy = ""
     zernio_key = os.environ.get("ZERNIO_API_KEY") or cfg.get("zernio_api_key") or _FALLBACK_ZERNIO_KEY
     zernio_acc = os.environ.get("ZERNIO_ACCOUNT_ID") or cfg.get("zernio_account_id") or _FALLBACK_ZERNIO_ACC
 
@@ -1232,144 +1232,125 @@ async def process_video_job(
             cookies_file = DATA_DIR / "cookies.txt"
             has_cookies = cookies_file.exists() and cookies_file.stat().st_size > 20
 
-            base_dl_args = ["--no-check-certificates"]
+            # Direct fast extraction with iOS/Android/Web player clients and socket timeout
+            base_dl_args = [
+                "--no-check-certificates",
+                "--extractor-args", "youtube:player_client=ios,android,web,mweb",
+                "--socket-timeout", "15"
+            ]
             bot_cfg = load_bot_config()
-            if bot_cfg.get("proxy"):
-                base_dl_args.extend(["--proxy", bot_cfg["proxy"]])
+            pxy = bot_cfg.get("proxy", "").strip()
+            if pxy and ("surfshark.com" not in pxy.lower()) and pxy.startswith("http"):
+                base_dl_args.extend(["--proxy", pxy])
             if Path(DENO_BIN).exists() or shutil.which("deno"):
                 base_dl_args.extend(["--js-runtimes", f"deno:{DENO_BIN}", "--remote-components", "ejs:github"])
             if has_cookies:
                 base_dl_args.extend(["--cookies", str(cookies_file)])
-            else:
-                base_dl_args.extend(["--extractor-args", "youtube:player_client=mweb,android,web"])
 
-            used_desi = False
-            if not has_cookies:
-                # 1. Try High-Speed DESI YouTube API first when no cookies
-                await update_status("⚡ <b>Connecting to High-Speed DESI YouTube API...</b>\n<i>Fetching direct stream without bot limits...</i>", force=True)
+            await update_status("🔍 <b>Connecting to High-Speed Stream Extractor...</b>\n<code>Analyzing video stream and subtitles...</code>", force=True)
 
-                def desi_progress(sent_b, total_b, pct, spd, eta):
-                    p_bar = render_progress_bar(pct, length=12)
-                    text = (
-                        f"📥 <b>Downloading via Ultra-Fast DESI API...</b>\n"
+            def fetch_info():
+                try:
+                    cmd = [
+                        sys.executable, "-m", "yt_dlp",
+                        *base_dl_args,
+                        "--no-warnings",
+                        "--print", "title",
+                        "--print", "duration",
+                        source_url_or_path
+                    ]
+                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                    if p.returncode == 0 and p.stdout.strip():
+                        lines = [x.strip() for x in p.stdout.strip().splitlines() if x.strip()]
+                        t = lines[0] if len(lines) > 0 else ""
+                        d = float(lines[1]) if len(lines) > 1 and lines[1].replace(".", "").isdigit() else 0.0
+                        return t, d
+                except Exception:
+                    pass
+                return "", 0.0
+
+            fetched_t, fetched_d = await asyncio.to_thread(fetch_info)
+            if fetched_t:
+                video_title = fetched_t
+
+            dl_cmd = [
+                sys.executable, "-m", "yt_dlp",
+                *base_dl_args,
+                "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18",
+                "--merge-output-format", "mp4",
+                "--write-auto-sub", "--write-sub",
+                "--sub-lang", "hi-orig,hi,en-orig,en",
+                "--sub-format", "json3",
+                "-o", str(raw_source_file),
+                "--newline",
+                source_url_or_path
+            ]
+
+            process = await asyncio.create_subprocess_exec(
+                *dl_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+
+            pct_reg = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
+            spd_reg = re.compile(r'at\s+([0-9\.]+[A-Za-z/]+)')
+            eta_reg = re.compile(r'ETA\s+([0-9:]+)')
+            size_reg = re.compile(r'of\s+~?([0-9\.]+[A-Za-z]+)')
+
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                line_str = line.decode('utf-8', errors='ignore')
+
+                p_m = pct_reg.search(line_str)
+                if p_m:
+                    p_val = float(p_m.group(1))
+                    s_m = spd_reg.search(line_str)
+                    e_m = eta_reg.search(line_str)
+                    sz_m = size_reg.search(line_str)
+
+                    spd = s_m.group(1) if s_m else "N/A"
+                    eta = e_m.group(1) if e_m else "N/A"
+                    sz = sz_m.group(1) if sz_m else "N/A"
+
+                    p_bar = render_progress_bar(p_val, length=12)
+                    status_text = (
+                        f"📥 <b>Downloading YouTube Video...</b>\n"
                         f"<code>{p_bar}</code>\n"
-                        f"⚡ <b>Speed:</b> {human_bytes(spd)}/s | ⏳ <b>ETA:</b> {human_time(eta)}\n"
-                        f"📦 <b>Size:</b> {human_bytes(sent_b)} / {human_bytes(total_b) if total_b else 'N/A'}"
+                        f"⚡ <b>Speed:</b> {spd} | ⏳ <b>ETA:</b> {eta}\n"
+                        f"📦 <b>Size:</b> {sz}\n"
+                        f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
                     )
-                    asyncio.run_coroutine_threadsafe(update_status(text), loop)
+                    await update_status(status_text)
 
-                desi_meta = await download_via_desi_api(source_url_or_path, raw_source_file, progress_callback=desi_progress)
-                if desi_meta and raw_source_file.exists() and raw_source_file.stat().st_size > 1000:
-                    used_desi = True
-                    if desi_meta.get("title"):
-                        video_title = desi_meta["title"]
+            await process.wait()
 
-            if not used_desi:
-                # 2. Multi-stream yt-dlp extractor (direct with cookies & Deno solver)
-                await update_status("🔍 <b>Connecting to Multi-Stream Extractor...</b>\n<code>Checking cookies and stream availability...</code>", force=True)
+            # Automatically parse downloaded json3 subtitles
+            sub_candidates = list(job_dir.glob("raw_video.*.json3"))
+            chosen_sub = None
+            for s_f in sub_candidates:
+                if ".hi-orig." in s_f.name or ".hi." in s_f.name:
+                    chosen_sub = s_f
+                    break
+            if not chosen_sub and sub_candidates:
+                chosen_sub = sub_candidates[0]
 
-                def fetch_info():
-                    try:
-                        cmd = [
-                            sys.executable, "-m", "yt_dlp",
-                            *base_dl_args,
-                            "--no-warnings",
-                            "--print", "title",
-                            "--print", "duration",
-                            source_url_or_path
-                        ]
-                        p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-                        if p.returncode == 0 and p.stdout.strip():
-                            lines = [x.strip() for x in p.stdout.strip().splitlines() if x.strip()]
-                            t = lines[0] if len(lines) > 0 else ""
-                            d = float(lines[1]) if len(lines) > 1 and lines[1].replace(".", "").isdigit() else 0.0
-                            return t, d
-                    except Exception:
-                        pass
-                    return "", 0.0
+            if chosen_sub:
+                all_snippets = load_subtitles_from_json3(chosen_sub)
 
-                fetched_t, fetched_d = await asyncio.to_thread(fetch_info)
-                if fetched_t:
-                    video_title = fetched_t
-
-                dl_cmd = [
-                    sys.executable, "-m", "yt_dlp",
-                    *base_dl_args,
-                    "-f", "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-                    "--merge-output-format", "mp4",
-                    "--write-auto-sub", "--write-sub",
-                    "--sub-lang", "hi-orig,hi,en-orig,en",
-                    "--sub-format", "json3",
-                    "-o", str(raw_source_file),
-                    "--newline",
-                    source_url_or_path
-                ]
-
-                process = await asyncio.create_subprocess_exec(
-                    *dl_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT
+            if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
+                fail_text = (
+                    "❌ <b>YouTube Anti-Bot Challenge Triggered:</b>\n\n"
+                    "YouTube is requiring authentication (Sign in to confirm you're not a bot).\n\n"
+                    "<b>Quick & Easy Fix (takes 10 seconds):</b>\n"
+                    "1. In your browser (Chrome/Edge/Firefox), install the free extension: <b>Get cookies.txt LOCALLY</b>\n"
+                    "2. Go to <code>youtube.com</code> and click the extension -> click <b>Export</b>\n"
+                    "3. <b>Send the exported <code>cookies.txt</code> file directly here to this bot!</b>\n\n"
+                    "<i>💡 Alternatively, you can directly send or forward any video file (MP4/MOV) right here to create viral shorts instantly!</i>"
                 )
-
-                pct_reg = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
-                spd_reg = re.compile(r'at\s+([0-9\.]+[A-Za-z/]+)')
-                eta_reg = re.compile(r'ETA\s+([0-9:]+)')
-                size_reg = re.compile(r'of\s+~?([0-9\.]+[A-Za-z]+)')
-
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    line_str = line.decode('utf-8', errors='ignore')
-
-                    p_m = pct_reg.search(line_str)
-                    if p_m:
-                        p_val = float(p_m.group(1))
-                        s_m = spd_reg.search(line_str)
-                        e_m = eta_reg.search(line_str)
-                        sz_m = size_reg.search(line_str)
-
-                        spd = s_m.group(1) if s_m else "N/A"
-                        eta = e_m.group(1) if e_m else "N/A"
-                        sz = sz_m.group(1) if sz_m else "N/A"
-
-                        p_bar = render_progress_bar(p_val, length=12)
-                        status_text = (
-                            f"📥 <b>Downloading YouTube Video...</b>\n"
-                            f"<code>{p_bar}</code>\n"
-                            f"⚡ <b>Speed:</b> {spd} | ⏳ <b>ETA:</b> {eta}\n"
-                            f"📦 <b>Size:</b> {sz}\n"
-                            f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
-                        )
-                        await update_status(status_text)
-
-                await process.wait()
-
-                # Automatically parse downloaded json3 subtitles
-                sub_candidates = list(job_dir.glob("raw_video.*.json3"))
-                chosen_sub = None
-                for s_f in sub_candidates:
-                    if ".hi-orig." in s_f.name or ".hi." in s_f.name:
-                        chosen_sub = s_f
-                        break
-                if not chosen_sub and sub_candidates:
-                    chosen_sub = sub_candidates[0]
-
-                if chosen_sub:
-                    all_snippets = load_subtitles_from_json3(chosen_sub)
-
-                if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
-                    fail_text = (
-                        "❌ <b>YouTube Anti-Bot Challenge Triggered:</b>\n\n"
-                        "YouTube is requiring authentication (Sign in to confirm you're not a bot).\n\n"
-                        "<b>Quick & Easy Fix (takes 10 seconds):</b>\n"
-                        "1. In your browser (Chrome/Edge/Firefox), install the free extension: <b>Get cookies.txt LOCALLY</b>\n"
-                        "2. Go to <code>youtube.com</code> and click the extension -> click <b>Export</b>\n"
-                        "3. <b>Send the exported <code>cookies.txt</code> file directly here to this bot!</b>\n\n"
-                        "<i>💡 Alternatively, you can directly send or forward any video file (MP4/MOV) right here to create viral shorts instantly!</i>"
-                    )
-                    await bot.edit_message_text(chat_id, msg_id, fail_text)
-                    return
+                await bot.edit_message_text(chat_id, msg_id, fail_text)
+                return
 
             target_source = raw_source_file
         else:
