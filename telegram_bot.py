@@ -1303,7 +1303,7 @@ async def process_video_job(
 
             if Path(DENO_BIN).exists() or shutil.which("deno"):
                 base_dl_args.extend(["--js-runtimes", f"deno:{DENO_BIN}", "--remote-components", "ejs:github"])
-            if has_cookies:
+            if has_cookies and not tunnel_proxy:
                 base_dl_args.extend(["--cookies", str(cookies_file)])
 
             await update_status("🔍 <b>Connecting to High-Speed Stream Extractor...</b>\n<code>Analyzing video stream and subtitles...</code>", force=True)
