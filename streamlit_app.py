@@ -422,8 +422,8 @@ with st.sidebar:
     st.markdown("### 📸 Instagram Reel Auto-Post")
     
     # 1. Zernio Unified API (No FB Required)
-    saved_zernio_key = st.session_state.get("zernio_api_key") or os.environ.get("ZERNIO_API_KEY") or "sk_a399c09ad5966e6768e297ee12ba0a88867a16cdc1c5c279e86b973f5b1b0221"
-    saved_zernio_acc = st.session_state.get("zernio_account_id") or os.environ.get("ZERNIO_ACCOUNT_ID") or "6affe7338ae0a5730bcf4ec4"
+    saved_zernio_key = st.session_state.get("zernio_api_key") or os.environ.get("ZERNIO_API_KEY") or (st.secrets.get("ZERNIO_API_KEY", "") if hasattr(st, "secrets") else "")
+    saved_zernio_acc = st.session_state.get("zernio_account_id") or os.environ.get("ZERNIO_ACCOUNT_ID") or (st.secrets.get("ZERNIO_ACCOUNT_ID", "") if hasattr(st, "secrets") else "")
     
     with st.expander("🌟 Zernio API (Direct Instagram - No FB)", expanded=True):
         st.caption("Publish directly to `@gtavi_hubk` via Zernio without Facebook developer portal.")
@@ -457,7 +457,7 @@ with st.sidebar:
     # 3. Surfshark VPN & Proxy (Streamlit USA Cloud Bypasser)
     st.divider()
     st.markdown("### 🛡️ Surfshark VPN / Proxy")
-    saved_proxy = st.session_state.get("surfshark_proxy") or os.environ.get("SURFSHARK_PROXY") or "http://9wPLNgvh3BzX7Bp4AhkMVcamark:G7YDFVncQSzp6SENwjJAS2Mu@in-mum.prod.surfshark.com:80"
+    saved_proxy = st.session_state.get("surfshark_proxy") or os.environ.get("SURFSHARK_PROXY") or (st.secrets.get("SURFSHARK_PROXY", "") if hasattr(st, "secrets") else "")
     with st.expander("🛡️ Surfshark Proxy Config", expanded=False):
         st.caption("Routes video downloads through Surfshark Mumbai (India) node to prevent USA YouTube IP blocks on Streamlit Cloud.")
         inp_proxy = st.text_input("Proxy URL", value=saved_proxy)
