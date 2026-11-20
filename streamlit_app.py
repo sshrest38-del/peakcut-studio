@@ -74,32 +74,44 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 META_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------- AUTO-START TELEGRAM BOT DAEMON (RUNS ON STREAMLIT CLOUD) ----------------
+_JS_RUNTIME_ARGS: Optional[list] = None
+
+
+def _starts_here(exe: str) -> bool:
+    """True if a program can actually be started on this computer. The bundled bin/qjs is a Linux
+    executable: Windows refuses to start it, and yt-dlp would then solve none of YouTube's
+    challenges ("n challenge solving failed"), so a working Deno or Node must win over it."""
+    try:
+        subprocess.run([exe, "--version"], capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=6, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return True
+    except Exception:
+        return False
+
+
 def get_js_runtime_args() -> list:
     """
-    Locates or prepares a JavaScript runtime (Node.js, QuickJS or Deno)
-    to solve YouTube's EJS / n challenge on video formats.
-    Prioritizes system Node.js on Linux (installed via packages.txt).
+    The JavaScript runtime yt-dlp uses to solve YouTube's challenges, as command line arguments.
+    Candidates are tried in order and the first one that starts on this machine wins; the answer
+    is remembered, because it cannot change while the app is running.
     """
-    # 1. System Node.js (most stable on Debian/Ubuntu Linux Streamlit Cloud)
-    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None) or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None)
-    if node_sys:
-        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
-
-    # 2. Bundled static QuickJS binary
-    qjs_bin = ROOT / "bin" / "qjs"
-    if qjs_bin.exists():
+    global _JS_RUNTIME_ARGS
+    if _JS_RUNTIME_ARGS is None:
+        qjs_bin = ROOT / "bin" / "qjs"
         if sys.platform.startswith("linux"):
             try:
                 os.chmod(str(qjs_bin), 0o755)
-            except Exception:
+            except OSError:
                 pass
-        return ["--js-runtimes", f"quickjs:{qjs_bin}", "--remote-components", "ejs:github"]
-
-    deno_sys = shutil.which("deno")
-    if deno_sys:
-        return ["--js-runtimes", f"deno:{deno_sys}", "--remote-components", "ejs:github"]
-
-    return []
+        node_sys = (shutil.which("node") or shutil.which("nodejs")
+                    or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None)
+                    or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None))
+        _JS_RUNTIME_ARGS = []
+        for kind, exe in (("node", node_sys), ("quickjs", str(qjs_bin)), ("deno", shutil.which("deno"))):
+            if exe and _starts_here(exe):
+                _JS_RUNTIME_ARGS = ["--js-runtimes", f"{kind}:{exe}", "--remote-components", "ejs:github"]
+                break
+    return list(_JS_RUNTIME_ARGS)
 
 _PPROXY_PROC = None
 

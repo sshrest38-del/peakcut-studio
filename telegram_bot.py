@@ -99,32 +99,45 @@ RENDERS_DIR = DATA_DIR / "renders"
 CONFIG_FILE = ROOT_DIR / "bot_config.json"
 USER_PREFS_FILE = DATA_DIR / "telegram_users.json"
 
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_JS_RUNTIME_ARGS: Optional[list] = None
+
+
+def _starts_here(exe: str) -> bool:
+    """True if a program can actually be started on this computer. The bundled bin/qjs is a Linux
+    executable: Windows refuses to start it, and yt-dlp would then solve none of YouTube's
+    challenges ("n challenge solving failed"), so a working Deno or Node must win over it."""
+    try:
+        subprocess.run([exe, "--version"], capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=6, creationflags=NO_WINDOW)
+        return True
+    except Exception:
+        return False
+
+
 def get_js_runtime_args() -> list:
     """
-    Locates or prepares a JavaScript runtime (Node.js, QuickJS or Deno)
-    to solve YouTube's EJS / n challenge on video formats.
-    Prioritizes system Node.js on Linux (installed via packages.txt).
+    The JavaScript runtime yt-dlp uses to solve YouTube's challenges, as command line arguments.
+    Candidates are tried in order and the first one that starts on this machine wins; the answer
+    is remembered, because it cannot change while the bot is running.
     """
-    # 1. System Node.js (most stable on Debian/Ubuntu Linux Streamlit Cloud)
-    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None) or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None)
-    if node_sys:
-        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
-
-    # 2. Bundled static QuickJS binary
-    qjs_bin = ROOT_DIR / "bin" / "qjs"
-    if qjs_bin.exists():
+    global _JS_RUNTIME_ARGS
+    if _JS_RUNTIME_ARGS is None:
+        qjs_bin = ROOT_DIR / "bin" / "qjs"
         if sys.platform.startswith("linux"):
             try:
                 os.chmod(str(qjs_bin), 0o755)
-            except Exception:
+            except OSError:
                 pass
-        return ["--js-runtimes", f"quickjs:{qjs_bin}", "--remote-components", "ejs:github"]
-
-    deno_sys = shutil.which("deno")
-    if deno_sys:
-        return ["--js-runtimes", f"deno:{deno_sys}", "--remote-components", "ejs:github"]
-
-    return []
+        node_sys = (shutil.which("node") or shutil.which("nodejs")
+                    or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None)
+                    or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None))
+        _JS_RUNTIME_ARGS = []
+        for kind, exe in (("node", node_sys), ("quickjs", str(qjs_bin)), ("deno", shutil.which("deno"))):
+            if exe and _starts_here(exe):
+                _JS_RUNTIME_ARGS = ["--js-runtimes", f"{kind}:{exe}", "--remote-components", "ejs:github"]
+                break
+    return list(_JS_RUNTIME_ARGS)
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1794,11 +1807,12 @@ async def process_video_job(
             if has_cookies:
                 print(f"[YouTube Cookies Active] Using {cookies_file} ({cookies_file.stat().st_size} bytes)")
 
-            # Match client to authentication: web client for web cookies
+            # Everything below must be true of every attempt: cookies, a JavaScript runtime for
+            # YouTube's challenges, TLS impersonation and the personal proxy if one is set.
+            # The player client is chosen separately, because the iOS fallback overrides it.
             base_dl_args = [
                 "--no-check-certificates",
                 "--socket-timeout", "20",
-                "--extractor-args", "youtube:player_client=web,default" if has_cookies else "youtube:player_client=ios,mweb"
             ]
             try:
                 import curl_cffi
@@ -1816,6 +1830,10 @@ async def process_video_job(
             if has_cookies:
                 base_dl_args.extend(["--cookies", str(cookies_file)])
 
+            # Match client to authentication: web client for web cookies
+            client_args = ["--extractor-args",
+                           "youtube:player_client=web,default" if has_cookies else "youtube:player_client=ios,mweb"]
+
             await update_status("🔍 <b>Connecting to High-Speed Stream Extractor...</b>\n<code>Analyzing video stream and subtitles...</code>", force=True)
 
             def fetch_info():
@@ -1823,12 +1841,15 @@ async def process_video_job(
                     cmd = [
                         sys.executable, "-m", "yt_dlp",
                         *base_dl_args,
+                        *client_args,
                         "--no-warnings",
                         "--print", "title",
                         "--print", "duration",
                         source_url_or_path
                     ]
-                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                    # a minute, not fifteen seconds: the proof-of-token helper starts Deno, which
+                    # on a cold start takes longer than that on its own
+                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                     if p.returncode == 0 and p.stdout.strip():
                         lines = [x.strip() for x in p.stdout.strip().splitlines() if x.strip()]
                         t = lines[0] if len(lines) > 0 else ""
@@ -1845,7 +1866,10 @@ async def process_video_job(
             dl_cmd = [
                 sys.executable, "-m", "yt_dlp",
                 *base_dl_args,
-                "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/b",
+                *client_args,
+                # the height cap matters in the first choice too: without it yt-dlp picks the
+                # biggest mp4 on the page (1440p and up), which is slow and often fails
+                "-f", "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/b",
                 "--merge-output-format", "mp4",
                 "--write-auto-sub", "--write-sub",
                 "--sub-lang", "hi-orig,hi,en-orig,en",
@@ -1908,8 +1932,10 @@ async def process_video_job(
                 )
                 alt_dl_cmd = [
                     sys.executable, "-m", "yt_dlp",
-                    "--no-check-certificates",
-                    "--socket-timeout", "20",
+                    *base_dl_args,
+                    # Same cookies, JS runtime and proxy as above; only the client changes. Without
+                    # them this attempt produces "n challenge solving failed" and
+                    # "Sign in to confirm you're not a bot" instead of a video.
                     "--extractor-args", "youtube:player_client=ios,mweb",
                     "-f", "b[ext=mp4]/best[height<=1080]/best/18/b",
                     "--merge-output-format", "mp4",
@@ -1971,14 +1997,14 @@ async def process_video_job(
                     # Quick separate subtitle fetch
                     subprocess.run([
                         sys.executable, "-m", "yt_dlp",
-                        "--no-check-certificates",
+                        *base_dl_args,
                         "--skip-download",
                         "--write-auto-sub", "--write-sub",
                         "--sub-lang", "hi-orig,hi,en-orig,en",
                         "--sub-format", "json3",
                         "-o", str(job_dir / "sub"),
                         source_url_or_path
-                    ], capture_output=True, timeout=15)
+                    ], capture_output=True, timeout=60)
                     sub_candidates = list(job_dir.glob("*.json3"))
                 except Exception:
                     pass
