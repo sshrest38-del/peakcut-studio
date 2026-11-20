@@ -48,8 +48,8 @@ try:
 except ImportError:
     unidecode = None
 
-# Auto-install essential runtime packages (pproxy and ytdlp-jsc) if missing
-for _pkg in ["pproxy", "ytdlp-jsc"]:
+# Auto-install essential runtime packages if missing
+for _pkg in ["pproxy", "ytdlp-jsc", "imageio-ffmpeg"]:
     try:
         __import__(_pkg.replace("-", "_"))
     except ImportError:
@@ -58,6 +58,34 @@ for _pkg in ["pproxy", "ytdlp-jsc"]:
             subprocess.run([sys.executable, "-m", "pip", "install", _pkg], capture_output=True, timeout=60)
         except Exception:
             pass
+
+def get_ffmpeg_binary() -> str:
+    """
+    Ensures FFmpeg binary is available on Streamlit Cloud or local environment.
+    Falls back to imageio-ffmpeg standalone executable if system FFmpeg is missing.
+    """
+    sys_ff = shutil.which("ffmpeg")
+    if sys_ff:
+        return sys_ff
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe:
+            d = Path(exe).parent
+            sym = d / ("ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+            if not sym.exists():
+                try:
+                    shutil.copy2(exe, str(sym))
+                except Exception:
+                    pass
+            if str(d) not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = f"{d}{os.pathsep}{os.environ.get('PATH', '')}"
+            return shutil.which("ffmpeg") or exe
+    except Exception as e:
+        print(f"[FFmpeg Loader] {e}")
+    return "ffmpeg"
+
+_FFMPEG_BIN = get_ffmpeg_binary()
 
 # Ensure PeakCut root is on sys.path
 ROOT_DIR = Path(__file__).parent.resolve()
@@ -714,7 +742,7 @@ def generate_ai_viral_meta(clip_path: Path, prompt_context: str = "", gemini_key
     
     try:
         subprocess.run([
-            "ffmpeg", "-y", "-ss", "2",
+            _FFMPEG_BIN, "-y", "-ss", "2",
             "-i", str(clip_path),
             "-vframes", "1",
             "-q:v", "2",
@@ -781,7 +809,7 @@ def detect_facecam_ai(video_path: Path, src_w: int, src_h: int, total_dur: float
     try:
         sample_time = max(2.0, min(total_dur * 0.35, 45.0))
         subprocess.run([
-            "ffmpeg", "-y", "-ss", f"{sample_time:.1f}",
+            _FFMPEG_BIN, "-y", "-ss", f"{sample_time:.1f}",
             "-i", str(video_path),
             "-vframes", "1", "-vf", "scale=768:-2", "-q:v", "3",
             str(sample_jpg)
@@ -1868,7 +1896,7 @@ async def process_video_job(
                         print(f"[Subtitle Burning Error] {e}")
 
             render_cmd = [
-                "ffmpeg", "-y",
+                _FFMPEG_BIN, "-y",
                 "-ss", f"{c_start:.2f}",
                 "-to", f"{c_end:.2f}",
                 "-i", str(target_source),
@@ -1880,9 +1908,16 @@ async def process_video_job(
             ]
 
             def do_render():
-                subprocess.run(render_cmd, cwd=job_dir, capture_output=True)
+                res = subprocess.run(render_cmd, cwd=job_dir, capture_output=True)
+                if not clip_out.exists():
+                    err_msg = res.stderr.decode("utf-8", errors="ignore")[-800:]
+                    print(f"[FFmpeg Render Error] {err_msg}")
+                    try:
+                        (job_dir / "render_error.log").write_text(err_msg, encoding="utf-8")
+                    except Exception:
+                        pass
                 subprocess.run([
-                    "ffmpeg", "-y", "-ss", "1",
+                    _FFMPEG_BIN, "-y", "-ss", "1",
                     "-i", str(clip_out),
                     "-vframes", "1", "-q:v", "2",
                     str(cover_out)
@@ -1900,7 +1935,11 @@ async def process_video_job(
                 })
 
         if not rendered_clips:
-            await bot.edit_message_text(chat_id, msg_id, "❌ <b>Rendering Failed:</b> FFmpeg could not encode the vertical video clips.")
+            err_detail = ""
+            err_log = job_dir / "render_error.log"
+            if err_log.exists():
+                err_detail = f"\n\n<code>{err_log.read_text(encoding='utf-8').strip()[-400:]}</code>"
+            await bot.edit_message_text(chat_id, msg_id, f"❌ <b>Rendering Failed:</b> FFmpeg could not encode the vertical video clips.{err_detail}")
             return
 
         # STEP 4: REFINING GEMINI AI VIRAL METADATA
