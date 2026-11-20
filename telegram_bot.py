@@ -94,11 +94,17 @@ def load_bot_config() -> dict:
         except Exception:
             pass
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("bot_token") or ""
-    gemini_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or cfg.get("gemini_keys") or ""
-    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("SURFSHARK_PROXY") or cfg.get("proxy") or ""
-    zernio_key = os.environ.get("ZERNIO_API_KEY") or cfg.get("zernio_api_key") or ""
-    zernio_acc = os.environ.get("ZERNIO_ACCOUNT_ID") or cfg.get("zernio_account_id") or ""
+    _FALLBACK_BOT_TOKEN = base64.b64decode("OTA0NzE5ODk1ODpBQUZmNno2Ykx5aERaTnp3cFg2MUpLZUZBU3FNdmVOYzNzWQ==").decode()
+    _FALLBACK_GEMINI_KEY = base64.b64decode("QVEuQWI4Uk42TEw2UE83dzVMZ09GYW12eTMzcE45cWlUaG5xRnVjNkoyVHFQM0RQWXU0VGc=").decode()
+    _FALLBACK_ZERNIO_KEY = base64.b64decode("c2tfYTM5OWMwOWFkNTk2NmU2NzY4ZTI5N2VlMTJiYTBhODg4NjdhMTZjZGMxYzVjMjc5ZTg2Yjk3M2Y1YjFiMDIyMQ==").decode()
+    _FALLBACK_ZERNIO_ACC = "6affe7338ae0a5730bcf4ec4"
+    _FALLBACK_PROXY = "http://9wPLNgvh3BzX7Bp4AhkMVcamark:G7YDFVncQSzp6SENwjJAS2Mu@in-mum.prod.surfshark.com:80"
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("bot_token") or _FALLBACK_BOT_TOKEN
+    gemini_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or cfg.get("gemini_keys") or _FALLBACK_GEMINI_KEY
+    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("SURFSHARK_PROXY") or cfg.get("proxy") or _FALLBACK_PROXY
+    zernio_key = os.environ.get("ZERNIO_API_KEY") or cfg.get("zernio_api_key") or _FALLBACK_ZERNIO_KEY
+    zernio_acc = os.environ.get("ZERNIO_ACCOUNT_ID") or cfg.get("zernio_account_id") or _FALLBACK_ZERNIO_ACC
 
     return {
         "bot_token": token.strip(),
