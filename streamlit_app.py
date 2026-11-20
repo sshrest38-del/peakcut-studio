@@ -15,8 +15,8 @@ import httpx
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-# Auto-install essential runtime packages (pproxy and ytdlp-jsc) if missing
-for _pkg in ["pproxy", "ytdlp-jsc"]:
+# Auto-install essential runtime packages if missing
+for _pkg in ["pproxy", "ytdlp-jsc", "imageio-ffmpeg"]:
     try:
         __import__(_pkg.replace("-", "_"))
     except ImportError:
@@ -25,6 +25,34 @@ for _pkg in ["pproxy", "ytdlp-jsc"]:
             subprocess.run([sys.executable, "-m", "pip", "install", _pkg], capture_output=True, timeout=60)
         except Exception:
             pass
+
+def get_ffmpeg_binary() -> str:
+    """
+    Ensures FFmpeg binary is available on Streamlit Cloud or local environment.
+    Falls back to imageio-ffmpeg standalone executable if system FFmpeg is missing.
+    """
+    sys_ff = shutil.which("ffmpeg")
+    if sys_ff:
+        return sys_ff
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe:
+            d = Path(exe).parent
+            sym = d / ("ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+            if not sym.exists():
+                try:
+                    shutil.copy2(exe, str(sym))
+                except Exception:
+                    pass
+            if str(d) not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = f"{d}{os.pathsep}{os.environ.get('PATH', '')}"
+            return shutil.which("ffmpeg") or exe
+    except Exception as e:
+        print(f"[FFmpeg Loader] {e}")
+    return "ffmpeg"
+
+_FFMPEG_BIN = get_ffmpeg_binary()
 
 # Streamlit Page Config
 st.set_page_config(
