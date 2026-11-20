@@ -225,6 +225,54 @@ def generate_ai_viral_meta(clip_path: Path, prompt_context: str = "") -> dict:
     }
 
 
+# ---------------- ZERNIO INSTAGRAM REEL POSTING (NO FACEBOOK REQUIRED) ----------------
+def post_to_zernio_reel(video_path: Path, caption_text: str, api_key: str, account_id: str) -> dict:
+    if not api_key or not account_id:
+        return {"ok": False, "error": "Zernio API Key or Account ID is missing."}
+    
+    base_api = "https://zernio.com/api/v1"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        # Step 1: Presigned upload URL
+        p_res = httpx.post(
+            f"{base_api}/media/presign",
+            headers=headers,
+            json={"filename": video_path.name, "contentType": "video/mp4"},
+            timeout=30.0
+        )
+        if p_res.status_code not in (200, 201):
+            return {"ok": False, "error": f"Zernio presign error: {p_res.text[:200]}"}
+        p_data = p_res.json()
+        upload_url = p_data.get("uploadUrl")
+        public_url = p_data.get("publicUrl")
+        if not upload_url or not public_url:
+            return {"ok": False, "error": "Zernio did not return upload/public URL"}
+        
+        # Step 2: Upload video bytes
+        with open(video_path, "rb") as vf:
+            v_bytes = vf.read()
+        put_res = httpx.put(upload_url, headers={"Content-Type": "video/mp4"}, content=v_bytes, timeout=180.0)
+        if put_res.status_code not in (200, 201):
+            return {"ok": False, "error": f"Zernio upload failed: {put_res.status_code}"}
+        
+        # Step 3: Create post
+        post_payload = {
+            "content": caption_text[:2200],
+            "platforms": [{"platform": "instagram", "accountId": account_id}],
+            "mediaItems": [{"type": "video", "url": public_url}],
+            "publishNow": True
+        }
+        res = httpx.post(f"{base_api}/posts", headers=headers, json=post_payload, timeout=60.0)
+        if res.status_code in (200, 201):
+            rj = res.json()
+            post_id = rj.get("post", {}).get("_id") or rj.get("data", {}).get("id") or "published"
+            return {"ok": True, "id": post_id, "url": "https://instagram.com/gtavi_hubk"}
+        else:
+            return {"ok": False, "error": f"Zernio publish error: {res.text[:250]}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ---------------- INSTAGRAM POSTING (GRAPH API) ----------------
 def post_to_instagram_reel(video_path: Path, caption_text: str, account_id: str, access_token: str, public_url: str = "") -> dict:
     if not account_id or not access_token:
@@ -333,32 +381,57 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 📸 Instagram Reel Auto-Post")
+    
+    # 1. Zernio Unified API (No FB Required)
+    saved_zernio_key = st.session_state.get("zernio_api_key") or os.environ.get("ZERNIO_API_KEY") or "sk_a399c09ad5966e6768e297ee12ba0a88867a16cdc1c5c279e86b973f5b1b0221"
+    saved_zernio_acc = st.session_state.get("zernio_account_id") or os.environ.get("ZERNIO_ACCOUNT_ID") or "6affe7338ae0a5730bcf4ec4"
+    
+    with st.expander("🌟 Zernio API (Direct Instagram - No FB)", expanded=True):
+        st.caption("Publish directly to `@gtavi_hubk` via Zernio without Facebook developer portal.")
+        inp_z_key = st.text_input("Zernio API Key", value=saved_zernio_key, type="password")
+        inp_z_acc = st.text_input("Instagram Account ID", value=saved_zernio_acc, placeholder="6affe7338ae0a5730bcf4ec4")
+        if st.button("Save Zernio Credentials", use_container_width=True):
+            st.session_state["zernio_api_key"] = inp_z_key.strip()
+            st.session_state["zernio_account_id"] = inp_z_acc.strip()
+            os.environ["ZERNIO_API_KEY"] = inp_z_key.strip()
+            os.environ["ZERNIO_ACCOUNT_ID"] = inp_z_acc.strip()
+            st.success("Zernio credentials saved!")
+            st.rerun()
+
+    if saved_zernio_key and saved_zernio_acc:
+        st.markdown("<span class='badge-ok'>🟢 Zernio Connected (@gtavi_hubk)</span>", unsafe_allow_html=True)
+
+    # 2. Meta Graph API (Optional fallback)
     saved_ig_id = st.session_state.get("ig_account_id") or os.environ.get("INSTAGRAM_ACCOUNT_ID") or ""
     saved_ig_token = st.session_state.get("ig_access_token") or os.environ.get("INSTAGRAM_ACCESS_TOKEN") or ""
-    try:
-        if "INSTAGRAM_ACCOUNT_ID" in st.secrets:
-            saved_ig_id = str(st.secrets["INSTAGRAM_ACCOUNT_ID"])
-        if "INSTAGRAM_ACCESS_TOKEN" in st.secrets:
-            saved_ig_token = str(st.secrets["INSTAGRAM_ACCESS_TOKEN"])
-    except Exception:
-        pass
-
-    with st.expander("⚙️ Instagram Account (Hidden)", expanded=not bool(saved_ig_token)):
+    with st.expander("⚙️ Meta Graph API (Optional Alternative)", expanded=False):
         inp_ig_id = st.text_input("Instagram Account ID", value=saved_ig_id, placeholder="e.g. 17841400...")
         inp_ig_token = st.text_input("Meta Graph API Access Token", value=saved_ig_token, type="password", placeholder="EAAG...")
-        
-        if st.button("Save Instagram Account", use_container_width=True):
+        if st.button("Save Meta Credentials", use_container_width=True):
             st.session_state["ig_account_id"] = inp_ig_id.strip()
             st.session_state["ig_access_token"] = inp_ig_token.strip()
             os.environ["INSTAGRAM_ACCOUNT_ID"] = inp_ig_id.strip()
             os.environ["INSTAGRAM_ACCESS_TOKEN"] = inp_ig_token.strip()
-            st.success("Instagram credentials saved!")
+            st.success("Meta credentials saved!")
             st.rerun()
 
-    if saved_ig_token:
-        st.markdown("<span class='badge-ok'>🟢 Instagram Connected</span>", unsafe_allow_html=True)
+    # 3. Surfshark VPN & Proxy (Streamlit USA Cloud Bypasser)
+    st.divider()
+    st.markdown("### 🛡️ Surfshark VPN / Proxy")
+    saved_proxy = st.session_state.get("surfshark_proxy") or os.environ.get("SURFSHARK_PROXY") or "http://9wPLNgvh3BzX7Bp4AhkMVcamark:G7YDFVncQSzp6SENwjJAS2Mu@in-mum.prod.surfshark.com:80"
+    with st.expander("🛡️ Surfshark Proxy Config", expanded=False):
+        st.caption("Routes video downloads through Surfshark Mumbai (India) node to prevent USA YouTube IP blocks on Streamlit Cloud.")
+        inp_proxy = st.text_input("Proxy URL", value=saved_proxy)
+        if st.button("Save Proxy", use_container_width=True):
+            st.session_state["surfshark_proxy"] = inp_proxy.strip()
+            os.environ["SURFSHARK_PROXY"] = inp_proxy.strip()
+            st.success("Proxy configured!")
+            st.rerun()
+
+    if saved_proxy:
+        st.markdown("<span class='badge-ok'>🟢 Surfshark Tunnel Active (Mumbai)</span>", unsafe_allow_html=True)
     else:
-        st.markdown("<span class='badge-warn'>⚪ Instagram Token Missing</span>", unsafe_allow_html=True)
+        st.markdown("<span class='badge-warn'>⚪ Direct Connection</span>", unsafe_allow_html=True)
 
 
 # ---------------- MAIN APPLICATION HEADER ----------------
@@ -375,34 +448,18 @@ with c_h1:
 
 with c_h2:
     st.markdown("<br>", unsafe_allow_html=True)
-    st.link_button("🌐 Open Port 8765 Web App", "http://127.0.0.1:8765/app/videos", use_container_width=True)
+    st.link_button("🌐 Open Cloudflare Pages UI", "https://peakcut-studio.pages.dev/app/videos", use_container_width=True)
 
 tabs = st.tabs([
-    "🖥️ Exact PeakCut UI (100% Original)",
-    "⚡ Streamlit Clipper & Instagram Poster",
-    "📂 All Clips Library",
+    "⚡ Streamlit FFmpeg Clipper & Instagram Poster",
+    "📂 All Rendered Clips & Instagram Poster",
+    "🎨 Cloudflare Pages PeakCut UI",
     "☁️ Cloudflare + Streamlit Deployment"
 ])
-tab_exact, tab_clipper, tab_gallery, tab_cf = tabs[0], tabs[1], tabs[2], tabs[3]
+tab_clipper, tab_gallery, tab_exact, tab_cf = tabs[0], tabs[1], tabs[2], tabs[3]
 
 
-# ================= TAB 0: EXACT PEAKCUT UI (100% ORIGINAL EMBED) =================
-with tab_exact:
-    st.markdown("#### 🎨 100% Exact PeakCut Web Interface")
-    st.caption("This renders the exact native PeakCut UI (with sidebar, custom layouts, animated styles, and full controls).")
-    
-    col_ctrl1, col_ctrl2 = st.columns([3, 1])
-    with col_ctrl1:
-        backend_web_url = st.text_input("PeakCut Web Address", value="http://127.0.0.1:8765/app/videos")
-    with col_ctrl2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.link_button("↗️ Open in New Tab", backend_web_url, use_container_width=True)
-
-    # Embed the exact native UI via iframe component
-    components.iframe(backend_web_url, height=880, scrolling=True)
-
-
-# ================= TAB 1: STREAMLIT CLIPPER & INSTAGRAM =================
+# ================= TAB 0: STREAMLIT CLIPPER & INSTAGRAM =================
 with tab_clipper:
     # 1. Source Input
     st.markdown("##### 🔗 Video Source")
@@ -412,7 +469,8 @@ with tab_clipper:
     uploaded_video_path = None
 
     if input_choice == "Paste Link":
-        video_url = st.text_input("Video Link", placeholder="Paste a YouTube, Twitch or Kick video link...", label_visibility="collapsed")
+        default_link = st.query_params.get("url", "https://youtu.be/ZnfOlhQwpSY")
+        video_url = st.text_input("Video Link", value=default_link, placeholder="Paste a YouTube, Twitch or Kick video link...", label_visibility="collapsed")
     else:
         uploaded_file = st.file_uploader("Upload Video", type=["mp4", "mov", "mkv", "webm", "ts"], label_visibility="collapsed")
         if uploaded_file is not None:
@@ -479,14 +537,35 @@ with tab_clipper:
                 if not uploaded_video_path:
                     logs.append("Fetching video stream with yt-dlp...")
                     status_box.info("\n".join(logs))
+                    # Check for Surfshark / Proxy
+                    proxy_val = st.session_state.get("surfshark_proxy") or os.environ.get("SURFSHARK_PROXY") or os.environ.get("HTTP_PROXY") or ""
+                    try:
+                        if not proxy_val and "SURFSHARK_PROXY" in st.secrets:
+                            proxy_val = str(st.secrets["SURFSHARK_PROXY"])
+                    except Exception:
+                        pass
+                    
+                    # Check for Netscape cookies
+                    cookies_file = Path(__file__).parent / "data" / "cookies.txt"
+                    try:
+                        if not cookies_file.exists() and "YOUTUBE_COOKIES" in st.secrets:
+                            cookies_file.parent.mkdir(parents=True, exist_ok=True)
+                            cookies_file.write_text(st.secrets["YOUTUBE_COOKIES"].strip(), encoding="utf-8")
+                    except Exception:
+                        pass
+
                     ytdlp_cmd = [
                         sys.executable, "-m", "yt_dlp",
                         "-f", "ba/b[height<=720]/b",
                         "-o", str(source_file),
                         "--no-warnings",
                         "--force-overwrites",
-                        active_source
                     ]
+                    if proxy_val:
+                        ytdlp_cmd.extend(["--proxy", proxy_val])
+                    if cookies_file.exists() and cookies_file.stat().st_size > 10:
+                        ytdlp_cmd.extend(["--cookies", str(cookies_file)])
+                    ytdlp_cmd.append(active_source)
                     prog_bar.progress(0.3, text="Downloading video stream...")
                     subprocess.run(ytdlp_cmd, capture_output=True, text=True)
                     target_video = str(source_file)
@@ -612,17 +691,27 @@ with tab_gallery:
 
                     with c_act3:
                         if st.button("📱 Post to Instagram Reel", key=f"post_ig_{clip_path.stem}_{idx}", type="primary", use_container_width=True):
+                            z_key = st.session_state.get("zernio_api_key") or os.environ.get("ZERNIO_API_KEY") or ""
+                            z_acc = st.session_state.get("zernio_account_id") or os.environ.get("ZERNIO_ACCOUNT_ID") or ""
                             ig_id = st.session_state.get("ig_account_id") or os.environ.get("INSTAGRAM_ACCOUNT_ID") or ""
                             ig_token = st.session_state.get("ig_access_token") or os.environ.get("INSTAGRAM_ACCESS_TOKEN") or ""
-                            if not ig_token or not ig_id:
-                                st.warning("⚠️ Enter Instagram Account ID & Access Token in left sidebar under 'Instagram Settings'.")
-                            else:
+
+                            if z_key and z_acc:
+                                with st.spinner("Posting Reel to Instagram via Zernio (@gtavi_hubk)..."):
+                                    res = post_to_zernio_reel(clip_path, full_post_caption, z_key, z_acc)
+                                    if res.get("ok"):
+                                        st.success(f"🎉 Posted to Instagram via Zernio! [View Profile]({res.get('url')})")
+                                    else:
+                                        st.error(f"Zernio Post Failed: {res.get('error')}")
+                            elif ig_id and ig_token:
                                 with st.spinner("Posting Reel to Instagram via Meta Graph API..."):
                                     res = post_to_instagram_reel(clip_path, full_post_caption, ig_id, ig_token)
                                     if res.get("ok"):
                                         st.success(f"🎉 Posted to Instagram! [View Reel]({res.get('url')})")
                                     else:
                                         st.error(f"Instagram Post Failed: {res.get('error')}")
+                            else:
+                                st.warning("⚠️ Please configure Zernio API Key & Account ID or Meta Graph API in sidebar.")
 
                 st.markdown("---")
 
