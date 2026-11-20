@@ -34,51 +34,74 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 META_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------- AUTO-START TELEGRAM BOT DAEMON (RUNS ON STREAMLIT CLOUD) ----------------
-@st.cache_resource
-def start_telegram_bot_daemon():
-    bot_script = ROOT / "telegram_bot.py"
-    if not bot_script.exists():
-        return None
-    try:
-        env = dict(os.environ)
-        # Pass st.secrets into subprocess env
+class BotDaemonManager:
+    _proc = None
+
+    @classmethod
+    def get_or_start(cls):
+        # If process exists and is running, return it
+        if cls._proc is not None and cls._proc.poll() is None:
+            return cls._proc
+
+        bot_script = ROOT / "telegram_bot.py"
+        if not bot_script.exists():
+            return None
         try:
-            for k in [
-                "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY", "ZERNIO_API_KEY",
-                "ZERNIO_ACCOUNT_ID", "SURFSHARK_PROXY", "HTTP_PROXY", "HTTPS_PROXY"
-            ]:
-                if k in st.secrets:
-                    env[k] = str(st.secrets[k])
-        except Exception:
-            pass
+            env = dict(os.environ)
+            # Pass st.secrets into subprocess env
+            try:
+                for k in [
+                    "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY", "ZERNIO_API_KEY",
+                    "ZERNIO_ACCOUNT_ID", "SURFSHARK_PROXY"
+                ]:
+                    if k in st.secrets:
+                        env[k] = str(st.secrets[k])
+            except Exception:
+                pass
 
-        # Also write cookies.txt if provided in st.secrets
-        try:
-            if "YOUTUBE_COOKIES" in st.secrets:
-                c_file = ROOT / "data" / "cookies.txt"
-                c_file.parent.mkdir(parents=True, exist_ok=True)
-                c_file.write_text(str(st.secrets["YOUTUBE_COOKIES"]).strip(), encoding="utf-8")
-        except Exception:
-            pass
+            # Ensure no dead proxy blocks Telegram
+            env.pop("HTTP_PROXY", None)
+            env.pop("HTTPS_PROXY", None)
+            env.pop("http_proxy", None)
+            env.pop("https_proxy", None)
 
-        # Spawn Telegram bot daemon in background
-        log_path = DATA_DIR / "bot_cloud.log"
-        log_f = open(log_path, "a", encoding="utf-8")
-        proc = subprocess.Popen(
-            [sys.executable, "-u", str(bot_script)],
-            cwd=str(ROOT),
-            stdout=log_f,
-            stderr=log_f,
-            text=True,
-            env=env
-        )
-        return proc
-    except Exception as e:
-        print(f"[Bot Auto-Start Error] {e}")
-        return None
+            # Also write cookies.txt if provided in st.secrets
+            try:
+                if "YOUTUBE_COOKIES" in st.secrets:
+                    c_file = ROOT / "data" / "cookies.txt"
+                    c_file.parent.mkdir(parents=True, exist_ok=True)
+                    c_file.write_text(str(st.secrets["YOUTUBE_COOKIES"]).strip(), encoding="utf-8")
+            except Exception:
+                pass
 
-# Starts once on Streamlit Cloud app boot and stays alive
-bot_daemon_proc = start_telegram_bot_daemon()
+            # Spawn Telegram bot daemon in background
+            log_path = DATA_DIR / "bot_cloud.log"
+            log_f = open(log_path, "a", encoding="utf-8")
+            cls._proc = subprocess.Popen(
+                [sys.executable, "-u", str(bot_script)],
+                cwd=str(ROOT),
+                stdout=log_f,
+                stderr=log_f,
+                text=True,
+                env=env
+            )
+            return cls._proc
+        except Exception as e:
+            print(f"[Bot Auto-Start Error] {e}")
+            return None
+
+    @classmethod
+    def restart(cls):
+        if cls._proc is not None:
+            try:
+                cls._proc.terminate()
+            except Exception:
+                pass
+            cls._proc = None
+        return cls.get_or_start()
+
+# Starts once on Streamlit Cloud app boot and self-heals if stopped
+bot_daemon_proc = BotDaemonManager.get_or_start()
 
 # Custom Styling to match PeakCut's modern dark UI
 st.markdown("""
@@ -477,19 +500,23 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🤖 Telegram Bot Daemon")
     log_file = DATA_DIR / "bot_cloud.log"
-    is_running = bot_daemon_proc is not None and (bot_daemon_proc.poll() is None)
+    live_proc = BotDaemonManager.get_or_start()
+    is_running = live_proc is not None and (live_proc.poll() is None)
     
     if is_running:
-        st.markdown("<span class='badge-ok'>🟢 Bot Running (@Drm5633_bot)</span>", unsafe_allow_html=True)
+        st.markdown(f"<span class='badge-ok'>🟢 Bot Running (@Drm5633_bot) [PID: {live_proc.pid}]</span>", unsafe_allow_html=True)
+        if st.button("🔄 Restart Bot", use_container_width=True):
+            BotDaemonManager.restart()
+            st.rerun()
     else:
         st.markdown("<span class='badge-warn'>🟡 Starting / Offline</span>", unsafe_allow_html=True)
-        if st.button("🚀 Start / Restart Bot", use_container_width=True):
-            st.cache_resource.clear()
+        if st.button("🚀 Start Bot Now", use_container_width=True):
+            BotDaemonManager.restart()
             st.rerun()
 
-    with st.expander("📋 View Bot Cloud Logs", expanded=False):
+    with st.expander("📋 View Bot Cloud Logs", expanded=not is_running):
         if log_file.exists():
-            log_lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()[-15:]
+            log_lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()[-25:]
             st.code("\n".join(log_lines) or "No log output yet.", language="text")
         else:
             st.caption("Logs will appear after initial run.")
