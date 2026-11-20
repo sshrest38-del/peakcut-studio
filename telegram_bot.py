@@ -468,8 +468,8 @@ def transcribe_clip_audio_with_gemini(audio_path: Path, gemini_key: str, clip_of
 
 def build_ass_subtitles(snippets: list, clip_start: float, clip_end: float, out_path: Path, gemini_key: str = ""):
     """
-    Builds vibrant bouncy ASS subtitles burned in the lower area (MarginV=220) of the 9:16 video.
-    Splits long sentences into punchy 2-3 word chunks (viral Shorts/Reels style) so text is never cluttered.
+    Builds clean, vibrant, non-overlapping ASS subtitles burned in the lower area (Y=1620) of 9:16 video.
+    Strictly prevents vertical stacking and limits text to 2-3 punchy words per cue (MrBeast / Reels style).
     """
     ass_head = """[Script Info]
 ScriptType: v4.00+
@@ -479,8 +479,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Bounce,DejaVu Sans,Liberation Sans,Arial,sans-serif,52,&H0000F0FF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,2,40,40,220,1
-Style: Clean,DejaVu Sans,Liberation Sans,Arial,sans-serif,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,0,2,40,40,220,1
+Style: Bounce,Arial,DejaVu Sans,Liberation Sans,sans-serif,56,&H0000F0FF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,5,0,0,0,1
+Style: Clean,Arial,DejaVu Sans,Liberation Sans,sans-serif,50,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,0,5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -503,28 +503,59 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # Batch convert any remaining Hindi to natural Hinglish
     active_snippets = batch_convert_snippets_to_hinglish(active_snippets, gemini_key=gemini_key)
 
+    # 1. Flatten all snippets into individual words with estimated word timings
+    all_words = []
     for snip in active_snippets:
-        s_rel = max(0.0, snip.start - offset)
-        e_rel = min(clip_end - clip_start, s_rel + snip.duration)
-        dur = e_rel - s_rel
-        if dur >= 0.2:
-            raw_t = snip.text.replace("\n", " ").strip()
-            clean_t = to_hinglish_if_hindi(raw_t)
-            clean_t = re.sub(r"[\{\}\\\/']", "", clean_t).strip().upper()
-            words = clean_t.split()
-            if not words:
-                continue
+        raw_t = snip.text.replace("\n", " ").strip()
+        clean_t = to_hinglish_if_hindi(raw_t)
+        clean_t = re.sub(r"[\{\}\\\/']", "", clean_t).strip().upper()
+        words = clean_t.split()
+        if not words:
+            continue
+        snip_s = max(clip_start, snip.start)
+        snip_dur = max(0.4, snip.duration)
+        snip_e = min(clip_end, snip_s + snip_dur)
+        if snip_e <= snip_s:
+            continue
+        w_dur = (snip_e - snip_s) / len(words)
+        for i, w in enumerate(words):
+            all_words.append({
+                "w": w,
+                "s": snip_s + i * w_dur,
+                "e": snip_s + (i + 1) * w_dur
+            })
 
-            # Split into punchy 2-3 words per subtitle event
-            max_w = 3
-            chunks = [" ".join(words[i:i+max_w]) for i in range(0, len(words), max_w)]
-            chunk_dur = dur / len(chunks)
+    # 2. Sort words strictly by timestamp and enforce non-overlapping times
+    all_words.sort(key=lambda x: x["s"])
+    for i in range(len(all_words) - 1):
+        if all_words[i]["e"] > all_words[i + 1]["s"]:
+            all_words[i]["e"] = max(all_words[i]["s"] + 0.1, all_words[i + 1]["s"])
 
-            for i, chunk in enumerate(chunks):
-                c_s = s_rel + i * chunk_dur
-                c_e = min(clip_end - clip_start, c_s + chunk_dur)
-                if c_e - c_s >= 0.15:
-                    events.append(f"Dialogue: 0,{to_ass_time(c_s)},{to_ass_time(c_e)},Bounce,,0,0,0,,{chunk}")
+    # 3. Group words into punchy 2-3 word chunks (never more than 3 words or 1.8 seconds)
+    groups = []
+    cur_g = []
+    for w in all_words:
+        if cur_g and (len(cur_g) >= 3 or (w["s"] - cur_g[-1]["e"] > 0.35) or (w["e"] - cur_g[0]["s"] > 1.8)):
+            groups.append(cur_g)
+            cur_g = []
+        cur_g.append(w)
+    if cur_g:
+        groups.append(cur_g)
+
+    # 4. Generate subtitle events with explicit position: \\an5\\pos(540,1620)
+    # This locks text cleanly in the bottom third and CAN NEVER stack vertically to the top of screen!
+    for i, g in enumerate(groups):
+        g_s_rel = max(0.0, g[0]["s"] - offset)
+        g_e_rel = min(clip_end - clip_start, g[-1]["e"] - offset)
+        # Ensure no overlap with next group
+        if i + 1 < len(groups):
+            next_s_rel = max(0.0, groups[i + 1][0]["s"] - offset)
+            if g_e_rel > next_s_rel:
+                g_e_rel = max(g_s_rel + 0.15, next_s_rel)
+
+        if g_e_rel - g_s_rel >= 0.15:
+            text = " ".join(w["w"] for w in g)
+            events.append(f"Dialogue: 0,{to_ass_time(g_s_rel)},{to_ass_time(g_e_rel)},Bounce,,0,0,0,,{{\\an5\\pos(540,1620)}}{text}")
 
     out_path.write_text(ass_head + "\n".join(events) + "\n", encoding="utf-8")
 
@@ -550,18 +581,48 @@ def build_srt_subtitles(snippets: list, clip_start: float, clip_end: float, out_
     # Transliterate Hindi to Hinglish
     active_snippets = batch_convert_snippets_to_hinglish(active_snippets, gemini_key=gemini_key)
 
+    all_words = []
+    for snip in active_snippets:
+        raw_t = snip.text.replace("\n", " ").strip()
+        clean_t = to_hinglish_if_hindi(raw_t)
+        clean_t = re.sub(r"[\{\}\\]", "", clean_t).strip().upper()
+        words = clean_t.split()
+        if not words:
+            continue
+        snip_s = max(clip_start, snip.start)
+        snip_e = min(clip_end, snip_s + max(0.4, snip.duration))
+        w_dur = (snip_e - snip_s) / len(words)
+        for i, w in enumerate(words):
+            all_words.append({"w": w, "s": snip_s + i * w_dur, "e": snip_s + (i + 1) * w_dur})
+
+    all_words.sort(key=lambda x: x["s"])
+    for i in range(len(all_words) - 1):
+        if all_words[i]["e"] > all_words[i + 1]["s"]:
+            all_words[i]["e"] = max(all_words[i]["s"] + 0.1, all_words[i + 1]["s"])
+
+    groups = []
+    cur_g = []
+    for w in all_words:
+        if cur_g and (len(cur_g) >= 3 or (w["s"] - cur_g[-1]["e"] > 0.35) or (w["e"] - cur_g[0]["s"] > 1.8)):
+            groups.append(cur_g)
+            cur_g = []
+        cur_g.append(w)
+    if cur_g:
+        groups.append(cur_g)
+
     entries = []
     idx = 1
-    for snip in active_snippets:
-        s_rel = max(0.0, snip.start - offset)
-        e_rel = min(clip_end - clip_start, s_rel + snip.duration)
-        if e_rel - s_rel >= 0.2:
-            raw_t = snip.text.replace("\n", " ").strip()
-            clean_t = to_hinglish_if_hindi(raw_t)
-            clean_t = re.sub(r"[\{\}\\]", "", clean_t).strip().upper()
-            if clean_t:
-                entries.append(f"{idx}\n{to_srt_time(s_rel)} --> {to_srt_time(e_rel)}\n{clean_t}\n")
-                idx += 1
+    for i, g in enumerate(groups):
+        g_s_rel = max(0.0, g[0]["s"] - offset)
+        g_e_rel = min(clip_end - clip_start, g[-1]["e"] - offset)
+        if i + 1 < len(groups):
+            next_s_rel = max(0.0, groups[i + 1][0]["s"] - offset)
+            if g_e_rel > next_s_rel:
+                g_e_rel = max(g_s_rel + 0.15, next_s_rel)
+        if g_e_rel - g_s_rel >= 0.15:
+            clean_t = " ".join(w["w"] for w in g)
+            entries.append(f"{idx}\n{to_srt_time(g_s_rel)} --> {to_srt_time(g_e_rel)}\n{clean_t}\n")
+            idx += 1
 
     out_path.write_text("\n".join(entries), encoding="utf-8")
 
@@ -797,14 +858,105 @@ def generate_ai_viral_meta(clip_path: Path, prompt_context: str = "", gemini_key
         "hashtags": ["#viral", "#reels", "#fyp", "#trending", "#gaming", "#shorts", "#explorepage"]
     }
 
-def detect_facecam_ai(video_path: Path, src_w: int, src_h: int, total_dur: float, gemini_key: str = "") -> Optional[dict]:
+def detect_facecam_ai(video_path: Path, src_w: int, src_h: int, total_dur: float, gemini_key: str = "", clip_s: float = 0.0, clip_e: float = 0.0) -> Optional[dict]:
     """
-    Detects speaker / facecam in the video using Gemini Vision AI + PeakCut stillness/edge snapping.
-    Returns: {"x": int, "y": int, "w": int, "h": int, "corner": str, "conf": str} or None.
+    Detects speaker / facecam in the video using Multi-Tier AI:
+    Tier 1: Instant Local OpenCV Face & Corner Tracker (100% offline, zero API key, super reliable).
+    Tier 2: Gemini Vision AI (if valid API key present).
+    Tier 3: PeakCut Studio Edge & Stillness snapping.
+    Returns: {"x": int, "y": int, "w": int, "h": int, "corner": str, "conf": str, "source": str} or None.
     """
+    # ----------------- TIER 1: OPENCV LOCAL FACE & WEBCAM TRACKER -----------------
+    try:
+        import cv2
+        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        
+        # Sample 6 frames across the target window
+        if clip_e > clip_s > 0:
+            sample_times = [clip_s + (clip_e - clip_s) * r for r in [0.15, 0.30, 0.45, 0.60, 0.75, 0.90]]
+        else:
+            sample_times = [total_dur * r for r in [0.15, 0.30, 0.45, 0.60, 0.75, 0.90]]
+
+        sightings = []  # list of (quadrant, x, y, w, h)
+
+        for st in sample_times:
+            sample_img_path = TMP_DIR / f"fc_scan_{int(time.time()*1000)}_{random.randint(100, 999)}.jpg"
+            try:
+                subprocess.run([
+                    _FFMPEG_BIN, "-y", "-ss", f"{st:.2f}",
+                    "-i", str(video_path),
+                    "-vframes", "1", "-vf", "scale=960:-2", "-q:v", "3",
+                    str(sample_img_path)
+                ], capture_output=True, timeout=12)
+
+                if sample_img_path.exists() and sample_img_path.stat().st_size > 1000:
+                    img = cv2.imread(str(sample_img_path))
+                    if img is not None:
+                        ih, iw = img.shape[:2]
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(25, 25))
+                        for (fx, fy, fw, fh) in faces:
+                            # Map back to full resolution
+                            rx = int(fx * src_w / iw)
+                            ry = int(fy * src_h / ih)
+                            rw = int(fw * src_w / iw)
+                            rh = int(fh * src_h / ih)
+
+                            # Determine quadrant (streamers sit in corners)
+                            cx = rx + rw // 2
+                            cy = ry + rh // 2
+                            q_x = "left" if cx < src_w * 0.48 else ("right" if cx > src_w * 0.52 else "center")
+                            q_y = "top" if cy < src_h * 0.48 else ("bottom" if cy > src_h * 0.52 else "middle")
+                            quadrant = f"{q_y}-{q_x}"
+                            sightings.append((quadrant, rx, ry, rw, rh))
+            except Exception as e:
+                pass
+            finally:
+                sample_img_path.unlink(missing_ok=True)
+
+        if sightings:
+            # Group by quadrant
+            from collections import Counter
+            quad_counts = Counter(s[0] for s in sightings)
+            best_quad, count = quad_counts.most_common(1)[0]
+            
+            # If face is consistently seen in a corner / panel in 2 or more frames
+            if count >= 2 or (len(sightings) == 1 and "middle" not in best_quad and "center" not in best_quad):
+                matching = [s for s in sightings if s[0] == best_quad]
+                med_x = int(sorted(s[1] for s in matching)[len(matching) // 2])
+                med_y = int(sorted(s[2] for s in matching)[len(matching) // 2])
+                med_w = int(sorted(s[3] for s in matching)[len(matching) // 2])
+                med_h = int(sorted(s[4] for s in matching)[len(matching) // 2])
+
+                # Build webcam bounding box around streamer's face
+                cam_w = int(max(med_w * 3.4, src_w * 0.18))
+                cam_h = int(max(med_h * 2.8, src_h * 0.22))
+                center_x = med_x + med_w // 2
+                center_y = med_y + med_h // 2
+
+                box_x = max(0, min(src_w - cam_w, center_x - cam_w // 2))
+                box_y = max(0, min(src_h - cam_h, center_y - int(cam_h * 0.38)))
+
+                # Snap to edge if close
+                if box_x <= src_w * 0.04:
+                    box_x = 0
+                elif box_x + cam_w >= src_w * 0.96:
+                    box_x = src_w - cam_w
+                if box_y <= src_h * 0.04:
+                    box_y = 0
+                elif box_y + cam_h >= src_h * 0.96:
+                    box_y = src_h - cam_h
+
+                print(f"[OpenCV Facecam Detected] corner={best_quad} box=({box_x}, {box_y}, {cam_w}, {cam_h}) sightings={count}")
+                return {"x": box_x, "y": box_y, "w": cam_w, "h": cam_h, "corner": best_quad, "conf": "high", "source": "opencv"}
+    except Exception as cv_err:
+        print(f"[OpenCV Face Detection Error] {cv_err}")
+
+    # ----------------- TIER 2: GEMINI VISION AI -----------------
     sample_jpg = TMP_DIR / f"fc_{int(time.time())}_{random.randint(100, 999)}.jpg"
     try:
-        sample_time = max(2.0, min(total_dur * 0.35, 45.0))
+        sample_time = clip_s + 5.0 if clip_e > clip_s > 0 else max(2.0, min(total_dur * 0.35, 45.0))
         subprocess.run([
             _FFMPEG_BIN, "-y", "-ss", f"{sample_time:.1f}",
             "-i", str(video_path),
@@ -814,14 +966,12 @@ def detect_facecam_ai(video_path: Path, src_w: int, src_h: int, total_dur: float
     except Exception as e:
         print(f"[Facecam Extract Frame Error] {e}")
 
-    if not sample_jpg.exists() or sample_jpg.stat().st_size < 500:
-        return None
-
     img_b64 = None
-    try:
-        img_b64 = base64.b64encode(sample_jpg.read_bytes()).decode("utf-8")
-    except Exception:
-        pass
+    if sample_jpg.exists() and sample_jpg.stat().st_size > 500:
+        try:
+            img_b64 = base64.b64encode(sample_jpg.read_bytes()).decode("utf-8")
+        except Exception:
+            pass
 
     keys = ([gemini_key] if gemini_key else []) + get_gemini_keys()
     fx_pct = fy_pct = fw_pct = fh_pct = None
@@ -835,7 +985,7 @@ def detect_facecam_ai(video_path: Path, src_w: int, src_h: int, total_dur: float
             "  CAM x=..% y=..% w=..% h=..%     (x, y is top-left corner as percentage, w and h are width and height percentage of the whole frame)\n"
             "  NO CAM"
         )
-        models_to_try = ["gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-flash-latest"]
+        models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
         for active_key in keys:
             for model in models_to_try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={active_key}"
@@ -866,7 +1016,7 @@ def detect_facecam_ai(video_path: Path, src_w: int, src_h: int, total_dur: float
             if fx_pct is not None:
                 break
 
-    # If Gemini found a camera or if no AI key, run PeakCut's studio.facecam edge snapping
+    # ----------------- TIER 3: PEAKCUT STILLNESS EDGE SNAPPING -----------------
     try:
         from studio import facecam
         def ask_callback(jpeg_bytes):
@@ -881,16 +1031,17 @@ def detect_facecam_ai(video_path: Path, src_w: int, src_h: int, total_dur: float
     except Exception as e:
         print(f"[Studio Facecam Error] {e}")
 
-    # Fallback directly to Gemini AI box if edge snapping didn't find hard borders
+    # Fallback to Gemini AI box
     if fx_pct is not None and fw_pct and fh_pct:
         fx = max(0, min(src_w - 40, int(round(src_w * fx_pct))))
         fy = max(0, min(src_h - 40, int(round(src_h * fy_pct))))
         fw = max(40, min(src_w - fx, int(round(src_w * fw_pct))))
         fh = max(40, min(src_h - fy, int(round(src_h * fh_pct))))
         sample_jpg.unlink(missing_ok=True)
-        return {"x": fx, "y": fy, "w": fw, "h": fh, "corner": "detected", "conf": "high"}
+        return {"x": fx, "y": fy, "w": fw, "h": fh, "corner": "detected", "conf": "high", "source": "gemini"}
 
     sample_jpg.unlink(missing_ok=True)
+    return None
     return None
 
 # ----------------- INSTAGRAM REELS META GRAPH API UPLOADER -----------------
@@ -1355,6 +1506,104 @@ def build_quality_keyboard(pref: dict) -> dict:
             [{"text": "⬅️ Back to Settings", "callback_data": "open_settings"}]
         ]
     }
+
+async def download_via_cobalt(url: str, dest_file: Path, progress_callback=None) -> Optional[dict]:
+    instances = [
+        "https://api.cobalt.tools/",
+        "https://cobalt.kwiatekm.pl/",
+        "https://api.wuk.sh/"
+    ]
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    body = {"url": url, "videoQuality": "1080"}
+    async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+        for inst in instances:
+            try:
+                r = await client.post(inst, json=body, headers=headers)
+                if r.status_code == 200:
+                    data = r.json()
+                    dl_url = data.get("url")
+                    if dl_url:
+                        async with client.stream("GET", dl_url, timeout=120.0) as resp:
+                            if resp.status_code == 200:
+                                total_bytes = int(resp.headers.get("content-length", 0))
+                                downloaded = 0
+                                start_time = time.time()
+                                last_call = 0.0
+                                with open(dest_file, "wb") as f:
+                                    async for chunk in resp.aiter_bytes(chunk_size=128 * 1024):
+                                        f.write(chunk)
+                                        downloaded += len(chunk)
+                                        now = time.time()
+                                        if progress_callback and (now - last_call >= 1.6 or (total_bytes and downloaded >= total_bytes)):
+                                            last_call = now
+                                            pct = (downloaded / total_bytes) * 100 if total_bytes else 0.0
+                                            elapsed = max(0.001, now - start_time)
+                                            spd = downloaded / elapsed
+                                            eta = (total_bytes - downloaded) / max(0.001, spd) if total_bytes else 0.0
+                                            progress_callback(downloaded, total_bytes, pct, spd, eta)
+                                if dest_file.exists() and dest_file.stat().st_size > 1000:
+                                    return {"title": data.get("filename", "YouTube Video"), "duration": 0.0}
+            except Exception as e:
+                print(f"[Cobalt Error {inst}] {e}")
+                continue
+    return None
+
+async def download_via_invidious(url: str, dest_file: Path, progress_callback=None) -> Optional[dict]:
+    m = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', url)
+    if not m:
+        return None
+    vid = m.group(1)
+    instances = [
+        f"https://invidious.nerdvpn.de/api/v1/videos/{vid}",
+        f"https://inv.tux.pizza/api/v1/videos/{vid}",
+        f"https://vid.priv.au/api/v1/videos/{vid}"
+    ]
+    async with httpx.AsyncClient(timeout=25.0, trust_env=False) as client:
+        for inst in instances:
+            try:
+                r = await client.get(inst)
+                if r.status_code == 200:
+                    data = r.json()
+                    formats = data.get("formatStreams", [])
+                    if not formats:
+                        continue
+                    best_f = None
+                    for f in formats:
+                        if f.get("container") == "mp4" and f.get("url"):
+                            best_f = f
+                            break
+                    if not best_f:
+                        best_f = formats[0]
+                    dl_url = best_f.get("url")
+                    if dl_url:
+                        async with client.stream("GET", dl_url, timeout=120.0) as resp:
+                            if resp.status_code == 200:
+                                total_bytes = int(resp.headers.get("content-length", 0))
+                                downloaded = 0
+                                start_time = time.time()
+                                last_call = 0.0
+                                with open(dest_file, "wb") as f:
+                                    async for chunk in resp.aiter_bytes(chunk_size=128 * 1024):
+                                        f.write(chunk)
+                                        downloaded += len(chunk)
+                                        now = time.time()
+                                        if progress_callback and (now - last_call >= 1.6 or (total_bytes and downloaded >= total_bytes)):
+                                            last_call = now
+                                            pct = (downloaded / total_bytes) * 100 if total_bytes else 0.0
+                                            elapsed = max(0.001, now - start_time)
+                                            spd = downloaded / elapsed
+                                            eta = (total_bytes - downloaded) / max(0.001, spd) if total_bytes else 0.0
+                                            progress_callback(downloaded, total_bytes, pct, spd, eta)
+                                if dest_file.exists() and dest_file.stat().st_size > 1000:
+                                    return {"title": data.get("title", ""), "duration": float(data.get("lengthSeconds", 0))}
+            except Exception as e:
+                print(f"[Invidious Error {inst}] {e}")
+                continue
+    return None
 
 async def download_via_desi_api(url: str, dest_file: Path, progress_callback=None) -> Optional[dict]:
     api_endpoint = f"https://sheffysamra1bot-yt-api.smpost-tempmail.workers.dev/?url={url}&type=video"
@@ -1870,7 +2119,7 @@ async def process_video_job(
             )
             try:
                 facecam_box = await asyncio.to_thread(
-                    detect_facecam_ai, target_source, src_w, src_h, total_dur, user_g_key
+                    detect_facecam_ai, target_source, src_w, src_h, total_dur, user_g_key, slices[0][0], slices[0][1]
                 )
                 if facecam_box:
                     corner = facecam_box.get("corner", "detected")
@@ -1884,6 +2133,19 @@ async def process_video_job(
         for idx, (c_start, c_end) in enumerate(slices, 1):
             cur_meta = clip_meta_list[idx - 1] if idx - 1 < len(clip_meta_list) else None
             hook_text = cur_meta.get("hook", "VIRAL MOMENT!") if cur_meta else "VIRAL MOMENT!"
+            if not hook_text or hook_text == "VIRAL MOMENT!":
+                # Generate punchy context hook from clip's spoken dialogue or title
+                clip_words = [s.text for s in all_snippets if s.start >= c_start - 0.5 and s.start < c_end]
+                if clip_words:
+                    sample_t = " ".join(clip_words[:8])
+                    sample_h = to_hinglish_if_hindi(sample_t)
+                    w_clean = re.sub(r"[^\w\s]", "", sample_h).strip().upper().split()
+                    if w_clean:
+                        hook_text = " ".join(w_clean[:3]) + "!"
+                elif video_title and len(video_title) > 3:
+                    t_clean = re.sub(r"[^\w\s]", "", video_title).strip().upper().split()
+                    if t_clean:
+                        hook_text = " ".join(t_clean[:3]) + "!"
 
             # Decide active layout: If facecam found, prioritize Split Screen or Gameplay PiP
             active_layout = layout_setting
@@ -1892,6 +2154,9 @@ async def process_video_job(
                     active_layout = "split"
                 elif layout_setting == "gameplay":
                     active_layout = "gameplay"
+            else:
+                if layout_setting == "split":
+                    active_layout = "crop"
 
             layout_desc = "AI Split Screen (Facecam Top)" if (active_layout == "split" and facecam_box) else (
                 "AI Gameplay (Facecam Corner)" if (active_layout == "gameplay" and facecam_box) else active_layout.title()
