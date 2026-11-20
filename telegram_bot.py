@@ -499,7 +499,7 @@ def transcribe_clip_audio_with_gemini(audio_path: Path, gemini_key: str, clip_of
             "1.2 - 3.5: ARE BHAI DEKHO KYA HUA\n"
             "3.5 - 6.0: GUYS FIGHT HO GAYI"
         )
-        for m_name in ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-flash-latest"]:
+        for m_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
             try:
                 resp = client.models.generate_content(model=m_name, contents=[uploaded, prompt])
                 if resp and resp.text:
@@ -2027,6 +2027,9 @@ async def process_video_job(
                         "--extractor-args", "youtube:player_client=tv_embedded,tv,visionos",
                         "-f", "bv*[height<=1080]+ba/b[height<=1080]/best",
                         "--merge-output-format", "mp4",
+                        "--write-auto-sub", "--write-sub",
+                        "--sub-lang", "hi-orig,hi,en-orig,en",
+                        "--sub-format", "json3",
                         "-o", str(raw_source_file),
                         "--newline",
                         source_url_or_path
