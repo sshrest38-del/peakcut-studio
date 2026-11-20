@@ -185,7 +185,7 @@ def _tunnel_listening(port: int = 8125) -> bool:
 
 class BotDaemonManager:
     _proc = None
-    _code_ver = "v5.2.0"
+    _code_ver = "v5.2.1"
     _started_ver = None
 
     @classmethod
