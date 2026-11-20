@@ -30,9 +30,18 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 import httpx
-from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
 import requests
-import unidecode
+
+try:
+    from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
+except ImportError:
+    MultipartEncoder = None
+    MultipartEncoderMonitor = None
+
+try:
+    import unidecode
+except ImportError:
+    unidecode = None
 
 # Ensure PeakCut root is on sys.path
 ROOT_DIR = Path(__file__).parent.resolve()
@@ -60,13 +69,43 @@ def load_bot_config() -> dict:
             cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except Exception:
             pass
+
+    # Read .streamlit/secrets.toml if running on Streamlit Cloud
+    sec_file = ROOT_DIR / ".streamlit" / "secrets.toml"
+    if sec_file.exists():
+        try:
+            content = sec_file.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k == "TELEGRAM_BOT_TOKEN" and not cfg.get("bot_token"):
+                        cfg["bot_token"] = v
+                    elif k == "GEMINI_API_KEY" and not cfg.get("gemini_keys"):
+                        cfg["gemini_keys"] = v
+                    elif k in ("SURFSHARK_PROXY", "HTTP_PROXY") and not cfg.get("proxy"):
+                        cfg["proxy"] = v
+                    elif k == "ZERNIO_API_KEY" and not cfg.get("zernio_api_key"):
+                        cfg["zernio_api_key"] = v
+                    elif k == "ZERNIO_ACCOUNT_ID" and not cfg.get("zernio_account_id"):
+                        cfg["zernio_account_id"] = v
+        except Exception:
+            pass
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("bot_token") or ""
-    gemini_keys = os.environ.get("GEMINI_API_KEYS") or cfg.get("gemini_keys") or ""
+    gemini_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or cfg.get("gemini_keys") or ""
     proxy = os.environ.get("HTTP_PROXY") or os.environ.get("SURFSHARK_PROXY") or cfg.get("proxy") or ""
+    zernio_key = os.environ.get("ZERNIO_API_KEY") or cfg.get("zernio_api_key") or ""
+    zernio_acc = os.environ.get("ZERNIO_ACCOUNT_ID") or cfg.get("zernio_account_id") or ""
+
     return {
         "bot_token": token.strip(),
         "gemini_keys": gemini_keys.strip() if isinstance(gemini_keys, str) else ",".join(gemini_keys),
-        "proxy": proxy.strip()
+        "proxy": proxy.strip(),
+        "zernio_api_key": zernio_key.strip(),
+        "zernio_account_id": zernio_acc.strip()
     }
 
 def save_bot_config(token: str, gemini_keys: str = None, proxy: str = None):
@@ -926,6 +965,16 @@ class TelegramBot:
                 if pct - last_pct[0] >= 3.0 or pct >= 100.0:
                     last_pct[0] = pct
                     progress_callback(sent, file_size, pct, speed, eta)
+
+        if MultipartEncoder is None or MultipartEncoderMonitor is None:
+            try:
+                files = {file_field: (file_path.name, file_obj, "video/mp4")}
+                r = self.session.post(url, data=extra_fields or {}, files=files, timeout=300)
+                file_obj.close()
+                return r.json()
+            except Exception as e:
+                file_obj.close()
+                return {"ok": False, "description": str(e)}
 
         encoder = MultipartEncoder(fields=fields)
         monitor = MultipartEncoderMonitor(encoder, mon_cb)
