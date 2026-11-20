@@ -1196,6 +1196,17 @@ def ensure_pproxy_tunnel() -> Optional[str]:
     if _PPROXY_PROC is not None and _PPROXY_PROC.poll() is None:
         return "http://127.0.0.1:8125"
 
+    # Auto-install pproxy if missing in the environment
+    try:
+        import pproxy
+    except ImportError:
+        try:
+            print("[Auto-Install] pproxy missing, installing via pip...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "pproxy"], capture_output=True, timeout=60)
+            import pproxy
+        except Exception as pie:
+            print(f"[Auto-Install Error] Could not install pproxy: {pie}")
+
     upstream = os.environ.get("SURFSHARK_PROXY", "").strip()
     if not upstream:
         sec_file = ROOT_DIR / ".streamlit" / "secrets.toml"
@@ -1221,19 +1232,25 @@ def ensure_pproxy_tunnel() -> Optional[str]:
             upstream = f"http+ssl://{h}:{pt}#{u}:{p}"
 
     try:
+        p_log = DATA_DIR / "pproxy.log"
+        p_out = open(p_log, "a", encoding="utf-8")
         cmd = [
             sys.executable, "-m", "pproxy",
             "-l", "http://127.0.0.1:8125",
-            "-r", upstream
+            "-r", upstream,
+            "-v"
         ]
         _PPROXY_PROC = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=p_out,
+            stderr=p_out
         )
-        time.sleep(0.8)
+        time.sleep(1.2)
         if _PPROXY_PROC.poll() is None:
+            print("[PProxy Tunnel Active] 127.0.0.1:8125 -> Surfshark Mumbai (443)")
             return "http://127.0.0.1:8125"
+        else:
+            print(f"[PProxy Exit Error] Process exited with code {_PPROXY_PROC.poll()}")
     except Exception as e:
         print(f"[PProxy Warning] Could not start pproxy tunnel: {e}")
     return None
@@ -1356,11 +1373,15 @@ async def process_video_job(
             eta_reg = re.compile(r'ETA\s+([0-9:]+)')
             size_reg = re.compile(r'of\s+~?([0-9\.]+[A-Za-z]+)')
 
+            dl_err_lines = []
             while True:
                 line = await process.stdout.readline()
                 if not line:
                     break
                 line_str = line.decode('utf-8', errors='ignore')
+                dl_err_lines.append(line_str.strip())
+                if len(dl_err_lines) > 25:
+                    dl_err_lines.pop(0)
 
                 p_m = pct_reg.search(line_str)
                 if p_m:
@@ -1399,14 +1420,13 @@ async def process_video_job(
                 all_snippets = load_subtitles_from_json3(chosen_sub)
 
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
+                recent_err = "\n".join([x for x in dl_err_lines if "ERROR:" in x or "WARNING:" in x or "Sign in" in x or "TransportError" in x][-3:])
                 fail_text = (
-                    "❌ <b>YouTube Anti-Bot Challenge Triggered:</b>\n\n"
-                    "YouTube is requiring authentication (Sign in to confirm you're not a bot).\n\n"
-                    "<b>Quick & Easy Fix (takes 10 seconds):</b>\n"
-                    "1. In your browser (Chrome/Edge/Firefox), install the free extension: <b>Get cookies.txt LOCALLY</b>\n"
-                    "2. Go to <code>youtube.com</code> and click the extension -> click <b>Export</b>\n"
-                    "3. <b>Send the exported <code>cookies.txt</code> file directly here to this bot!</b>\n\n"
-                    "<i>💡 Alternatively, you can directly send or forward any video file (MP4/MOV) right here to create viral shorts instantly!</i>"
+                    f"❌ <b>Download Error Encountered:</b>\n\n"
+                    f"<code>{recent_err or 'No media streams found.'}</code>\n\n"
+                    "💡 <b>Tips:</b>\n"
+                    "1. Upload or forward any video file (MP4/MOV) directly here.\n"
+                    "2. Or export and send fresh <code>cookies.txt</code> to this bot."
                 )
                 await bot.edit_message_text(chat_id, msg_id, fail_text)
                 return
