@@ -34,6 +34,49 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 META_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------- AUTO-START TELEGRAM BOT DAEMON (RUNS ON STREAMLIT CLOUD) ----------------
+_PPROXY_PROC = None
+
+def ensure_pproxy_tunnel() -> Optional[str]:
+    """
+    Spawns a local pproxy daemon listening on 127.0.0.1:8125 that bridges
+    to Surfshark HTTPS proxy on in-mum.prod.surfshark.com:443.
+    """
+    global _PPROXY_PROC
+    if _PPROXY_PROC is not None and _PPROXY_PROC.poll() is None:
+        return "http://127.0.0.1:8125"
+
+    upstream = os.environ.get("SURFSHARK_PROXY", "").strip()
+    if not upstream and hasattr(st, "secrets") and "SURFSHARK_PROXY" in st.secrets:
+        upstream = str(st.secrets["SURFSHARK_PROXY"]).strip()
+
+    if not upstream or "amark" in upstream:
+        upstream = "http+ssl://in-mum.prod.surfshark.com:443#9wPLNgvh3BzX7Bp4AhkMVcam:G7YDFVncQSzp6SENwjJAS2Mu"
+
+    if upstream.startswith("http://") or upstream.startswith("https://"):
+        m = re.match(r'https?://([^:]+):([^@]+)@([^:/]+):?(\d+)?', upstream)
+        if m:
+            u, p, h, pt = m.groups()
+            pt = pt or "443"
+            upstream = f"http+ssl://{h}:{pt}#{u}:{p}"
+
+    try:
+        cmd = [
+            sys.executable, "-m", "pproxy",
+            "-l", "http://127.0.0.1:8125",
+            "-r", upstream
+        ]
+        _PPROXY_PROC = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        time.sleep(0.8)
+        if _PPROXY_PROC.poll() is None:
+            return "http://127.0.0.1:8125"
+    except Exception as e:
+        print(f"[PProxy Warning] Could not start pproxy tunnel: {e}")
+    return None
+
 class BotDaemonManager:
     _proc = None
 
@@ -491,8 +534,9 @@ with st.sidebar:
             st.success("Proxy configured!")
             st.rerun()
 
-    if saved_proxy:
-        st.markdown("<span class='badge-ok'>🟢 Surfshark Tunnel Active (Mumbai)</span>", unsafe_allow_html=True)
+    t_proxy = ensure_pproxy_tunnel()
+    if t_proxy or saved_proxy:
+        st.markdown("<span class='badge-ok'>🟢 Surfshark HTTPS Proxy Tunnel Active (Mumbai)</span>", unsafe_allow_html=True)
     else:
         st.markdown("<span class='badge-warn'>⚪ Direct Connection</span>", unsafe_allow_html=True)
 
@@ -617,10 +661,14 @@ with tab_clipper:
                 if not uploaded_video_path:
                     logs.append("Fetching video stream with yt-dlp...")
                     status_box.info("\n".join(logs))
-                    # Check for Proxy (only use if not openvpn surfshark endpoint)
-                    proxy_val = st.session_state.get("surfshark_proxy") or os.environ.get("SURFSHARK_PROXY") or os.environ.get("HTTP_PROXY") or ""
-                    if "surfshark.com" in proxy_val.lower():
-                        proxy_val = ""
+                    # Route via local pproxy tunnel to Surfshark Mumbai HTTPS proxy
+                    tunnel_proxy = ensure_pproxy_tunnel()
+                    if tunnel_proxy:
+                        proxy_val = tunnel_proxy
+                    else:
+                        proxy_val = st.session_state.get("surfshark_proxy") or os.environ.get("SURFSHARK_PROXY") or os.environ.get("HTTP_PROXY") or ""
+                        if "surfshark.com" in proxy_val.lower():
+                            proxy_val = ""
                     
                     # Check for Netscape cookies
                     cookies_file = Path(__file__).parent / "data" / "cookies.txt"
