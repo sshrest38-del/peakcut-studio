@@ -27,7 +27,6 @@ DATA_DIR = ROOT / "data"
 OUTPUT_DIR = DATA_DIR / "renders"
 WORK_DIR = ROOT / "data" / "tmp"
 META_DIR = DATA_DIR / "metadata"
-CF_PAGES_DIR = ROOT / "cloudflare_pages"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -375,11 +374,6 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    st.markdown("### ☁️ Cloudflare Pages Setup")
-    st.markdown("<span class='badge-cf'>⚡ Cloudflare Pages Ready</span>", unsafe_allow_html=True)
-    st.caption("Frontend folder ready: `cloudflare_pages/` with `_worker.js` proxy to Streamlit backend.")
-
-    st.divider()
     st.markdown("### 📸 Instagram Reel Auto-Post")
     
     # 1. Zernio Unified API (No FB Required)
@@ -435,28 +429,20 @@ with st.sidebar:
 
 
 # ---------------- MAIN APPLICATION HEADER ----------------
-c_h1, c_h2 = st.columns([4, 1])
-with c_h1:
-    st.markdown("""
-    <div class="brand-title">
-        <span class="brand-orange">✂️ PeakCut</span> Studio
-    </div>
-    <div class="brand-subtitle">
-        Cloudflare Edge Frontend + Streamlit Cloud High-Performance Backend | Multi-Gemini AI & Instagram Auto-Post
-    </div>
-    """, unsafe_allow_html=True)
-
-with c_h2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.link_button("🌐 Open Cloudflare Pages UI", "https://peakcut-studio.pages.dev/app/videos", use_container_width=True)
+st.markdown("""
+<div class="brand-title">
+    <span class="brand-orange">✂️ PeakCut</span> Studio
+</div>
+<div class="brand-subtitle">
+    AI Viral Video Clipper & Auto Instagram Reels Studio | Multi-Gemini AI & Hinglish Subtitles
+</div>
+""", unsafe_allow_html=True)
 
 tabs = st.tabs([
-    "⚡ Streamlit FFmpeg Clipper & Instagram Poster",
-    "📂 All Rendered Clips & Instagram Poster",
-    "🎨 Cloudflare Pages PeakCut UI",
-    "☁️ Cloudflare + Streamlit Deployment"
+    "⚡ AI Viral Video Clipper & Instagram Poster",
+    "📂 All Rendered Clips & Instagram Poster"
 ])
-tab_clipper, tab_gallery, tab_exact, tab_cf = tabs[0], tabs[1], tabs[2], tabs[3]
+tab_clipper, tab_gallery = tabs[0], tabs[1]
 
 
 # ================= TAB 0: STREAMLIT CLIPPER & INSTAGRAM =================
@@ -716,38 +702,4 @@ with tab_gallery:
                 st.markdown("---")
 
 
-# ================= TAB 3: CLOUDFLARE + STREAMLIT ARCHITECTURE =================
-with tab_cf:
-    st.markdown("#### ☁️ Cloudflare Pages (Frontend) + Streamlit (Backend) Setup")
-    st.markdown("""
-    Aapka request pura taiyaar hai:
-    - **Frontend**: 100% Exact PeakCut UI Cloudflare Pages par chalega (Global CDN, fast, custom domain / `.pages.dev`).
-    - **Backend**: Video download, FFmpeg clipping, Gemini Vision AI, aur Instagram Posting Streamlit/Python server par chalegi.
-    - **Bridge**: `cloudflare_pages/_worker.js` automatically saare API calls (`/api/...`) backend server par forward/proxy karega.
 
-    ---
-    ##### 🚀 Cloudflare Pages Deploy Karne Ka Tarika:
-
-    **Option 1: 1-Click Batch Script Se (Sabse Asaan)**
-    1. Folder me bane **`deploy_to_cloudflare.bat`** par double click karein.
-    2. Yeh automatically Cloudflare Wrangler CLI chala kar `cloudflare_pages` ko deploy kar dega.
-
-    **Option 2: GitHub / Cloudflare Dashboard Se**
-    1. Apne GitHub repository ko Cloudflare Dashboard (Workers & Pages ➔ Create application ➔ Pages) se connect karein.
-    2. Build configuration:
-       - **Framework preset**: `None`
-       - **Build output directory**: `cloudflare_pages`
-    3. **Environment Variables** me backend ka address daalein:
-       - Variable name: `BACKEND_URL`
-       - Value: `https://your-streamlit-app.streamlit.app` (ya aapka public server URL)
-    4. Click **Save and Deploy**.
-
-    ---
-    ##### 🔒 Streamlit Cloud Secrets:
-    Agar backend ko Streamlit Community Cloud par rakh rahe hain toh App Secrets me yeh paste karein:
-    ```toml
-    GEMINI_API_KEYS = "AIzaSyKey1..., AIzaSyKey2..., AIzaSyKey3..."
-    INSTAGRAM_ACCOUNT_ID = "17841400..."
-    INSTAGRAM_ACCESS_TOKEN = "EAAG..."
-    ```
-    """)
