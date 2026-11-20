@@ -62,13 +62,14 @@ def start_telegram_bot_daemon():
             pass
 
         # Spawn Telegram bot daemon in background
+        log_path = DATA_DIR / "bot_cloud.log"
+        log_f = open(log_path, "a", encoding="utf-8")
         proc = subprocess.Popen(
             [sys.executable, "-u", str(bot_script)],
             cwd=str(ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stdout=log_f,
+            stderr=log_f,
             text=True,
-            bufsize=1,
             env=env
         )
         return proc
@@ -474,9 +475,24 @@ with st.sidebar:
 
     # 4. Telegram Bot Daemon Status
     st.divider()
-    st.markdown("### 🤖 Telegram Bot")
-    st.markdown("<span class='badge-ok'>🟢 Running on Streamlit Cloud (@Drm5633_bot)</span>", unsafe_allow_html=True)
-    st.caption("Active in background. Paste video links in Telegram to auto-clip and post Reels!")
+    st.markdown("### 🤖 Telegram Bot Daemon")
+    log_file = DATA_DIR / "bot_cloud.log"
+    is_running = bot_daemon_proc is not None and (bot_daemon_proc.poll() is None)
+    
+    if is_running:
+        st.markdown("<span class='badge-ok'>🟢 Bot Running (@Drm5633_bot)</span>", unsafe_allow_html=True)
+    else:
+        st.markdown("<span class='badge-warn'>🟡 Starting / Offline</span>", unsafe_allow_html=True)
+        if st.button("🚀 Start / Restart Bot", use_container_width=True):
+            st.cache_resource.clear()
+            st.rerun()
+
+    with st.expander("📋 View Bot Cloud Logs", expanded=False):
+        if log_file.exists():
+            log_lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()[-15:]
+            st.code("\n".join(log_lines) or "No log output yet.", language="text")
+        else:
+            st.caption("Logs will appear after initial run.")
 
 
 # ---------------- MAIN APPLICATION HEADER ----------------
