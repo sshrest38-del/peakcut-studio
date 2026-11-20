@@ -21,6 +21,7 @@ import json
 import re
 import math
 import uuid
+import random
 import asyncio
 import base64
 import shutil
@@ -228,7 +229,7 @@ def cleanup_storage(max_age_seconds: int = 1800) -> tuple:
 # ----------------- USER PREFERENCES -----------------
 
 DEFAULT_PREF = {
-    "layout": "blur",        # blur, zoom, crop, gameplay
+    "layout": "split",       # split (AI Facecam Top + Game), gameplay (PiP), blur, zoom, crop
     "style": "bounce",       # bounce, hype, clean, none
     "send_mode": "both",     # video (HD Media), document (Doc file), both
     "clips_count": 1,        # 1, 3, 5, "full"
@@ -771,6 +772,102 @@ def generate_ai_viral_meta(clip_path: Path, prompt_context: str = "", gemini_key
         "hashtags": ["#viral", "#reels", "#fyp", "#trending", "#gaming", "#shorts", "#explorepage"]
     }
 
+def detect_facecam_ai(video_path: Path, src_w: int, src_h: int, total_dur: float, gemini_key: str = "") -> Optional[dict]:
+    """
+    Detects speaker / facecam in the video using Gemini Vision AI + PeakCut stillness/edge snapping.
+    Returns: {"x": int, "y": int, "w": int, "h": int, "corner": str, "conf": str} or None.
+    """
+    sample_jpg = TMP_DIR / f"fc_{int(time.time())}_{random.randint(100, 999)}.jpg"
+    try:
+        sample_time = max(2.0, min(total_dur * 0.35, 45.0))
+        subprocess.run([
+            "ffmpeg", "-y", "-ss", f"{sample_time:.1f}",
+            "-i", str(video_path),
+            "-vframes", "1", "-vf", "scale=768:-2", "-q:v", "3",
+            str(sample_jpg)
+        ], capture_output=True, timeout=25)
+    except Exception as e:
+        print(f"[Facecam Extract Frame Error] {e}")
+
+    if not sample_jpg.exists() or sample_jpg.stat().st_size < 500:
+        return None
+
+    img_b64 = None
+    try:
+        img_b64 = base64.b64encode(sample_jpg.read_bytes()).decode("utf-8")
+    except Exception:
+        pass
+
+    keys = ([gemini_key] if gemini_key else []) + get_gemini_keys()
+    fx_pct = fy_pct = fw_pct = fh_pct = None
+
+    if keys and img_b64:
+        prompt = (
+            "One frame of a gaming stream or video is attached.\n"
+            "A streamer, gamer, or speaker often has their real face filmed by a webcam/camera in a corner or panel of the screen.\n"
+            "Is a real human speaker or streamer webcam visible on this frame? (A real person in a room, not a video game character, not a HUD menu).\n"
+            "Answer in ONE LINE and NOTHING ELSE:\n"
+            "  CAM x=..% y=..% w=..% h=..%     (x, y is top-left corner as percentage, w and h are width and height percentage of the whole frame)\n"
+            "  NO CAM"
+        )
+        models_to_try = ["gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-flash-latest"]
+        for active_key in keys:
+            for model in models_to_try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={active_key}"
+                body = {
+                    "contents": [{
+                        "role": "user",
+                        "parts": [
+                            {"text": prompt},
+                            {"inline_data": {"mimeType": "image/jpeg", "data": img_b64}}
+                        ]
+                    }],
+                    "generationConfig": {"temperature": 0.1}
+                }
+                try:
+                    r = httpx.post(url, json=body, timeout=15)
+                    if r.status_code == 200:
+                        data = r.json()
+                        text = "".join(p.get("text", "") for p in data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
+                        m = re.search(r"x\s*=\s*(\d+(?:\.\d+)?)\s*%?\s*,?\s*y\s*=\s*(\d+(?:\.\d+)?)\s*%?\s*,?\s*w\s*=\s*(\d+(?:\.\d+)?)\s*%?\s*,?\s*h\s*=\s*(\d+(?:\.\d+)?)", text, re.I)
+                        if m:
+                            fx_pct, fy_pct, fw_pct, fh_pct = (float(v) / 100.0 for v in m.groups())
+                            break
+                        if "NO CAM" in text.upper():
+                            sample_jpg.unlink(missing_ok=True)
+                            return None
+                except Exception:
+                    continue
+            if fx_pct is not None:
+                break
+
+    # If Gemini found a camera or if no AI key, run PeakCut's studio.facecam edge snapping
+    try:
+        from studio import facecam
+        def ask_callback(jpeg_bytes):
+            if fx_pct is not None:
+                return {"looked": True, "box": (fx_pct, fy_pct, fw_pct, fh_pct)}
+            return {"looked": False, "box": None}
+
+        fc_res = facecam.detect(video_path, ask=ask_callback)
+        if fc_res and fc_res.get("w", 0) > 40 and fc_res.get("h", 0) > 40:
+            sample_jpg.unlink(missing_ok=True)
+            return fc_res
+    except Exception as e:
+        print(f"[Studio Facecam Error] {e}")
+
+    # Fallback directly to Gemini AI box if edge snapping didn't find hard borders
+    if fx_pct is not None and fw_pct and fh_pct:
+        fx = max(0, min(src_w - 40, int(round(src_w * fx_pct))))
+        fy = max(0, min(src_h - 40, int(round(src_h * fy_pct))))
+        fw = max(40, min(src_w - fx, int(round(src_w * fw_pct))))
+        fh = max(40, min(src_h - fy, int(round(src_h * fh_pct))))
+        sample_jpg.unlink(missing_ok=True)
+        return {"x": fx, "y": fy, "w": fw, "h": fh, "corner": "detected", "conf": "high"}
+
+    sample_jpg.unlink(missing_ok=True)
+    return None
+
 # ----------------- INSTAGRAM REELS META GRAPH API UPLOADER -----------------
 
 async def post_to_instagram_reel(
@@ -1097,7 +1194,13 @@ class TelegramBot:
 # ----------------- UI / MENUS & SETTINGS -----------------
 
 def build_settings_keyboard(pref: dict) -> dict:
-    layout_lbl = {"blur": "📐 Blur (9:16)", "zoom": "🔍 Zoom (9:16)", "crop": "✂️ Crop (9:16)", "gameplay": "🎮 Gameplay"}.get(pref["layout"], pref["layout"])
+    layout_lbl = {
+        "split": "📱 AI Split Screen",
+        "gameplay": "🎮 AI Gameplay (PiP)",
+        "blur": "📐 Blur (70% HD)",
+        "zoom": "🔍 Zoom (9:16)",
+        "crop": "✂️ Crop (9:16)"
+    }.get(pref["layout"], pref["layout"])
     style_lbl = {"bounce": "✍️ Bounce", "hype": "🔥 Hype", "clean": "💎 Clean", "none": "🚫 None"}.get(pref["style"], pref["style"])
     send_lbl = {"video": "🎬 HD Video", "document": "📁 Document", "both": "🎬+📁 Both"}.get(pref["send_mode"], pref["send_mode"])
     dur_lbl = f"⏱️ {pref['clip_dur']}s"
@@ -1147,14 +1250,15 @@ def build_settings_keyboard(pref: dict) -> dict:
     }
 
 def build_layout_keyboard(pref: dict) -> dict:
-    cur = pref["layout"]
+    cur = pref.get("layout", "split")
     def mark(val): return "✅ " if cur == val else ""
     return {
         "inline_keyboard": [
-            [{"text": f"{mark('blur')}Blurred Fill (1080x1920) 🌟", "callback_data": "set_layout_blur"}],
-            [{"text": f"{mark('zoom')}Zoomed In (1080x1920)", "callback_data": "set_layout_zoom"}],
-            [{"text": f"{mark('crop')}Fill Screen (Center Crop)", "callback_data": "set_layout_crop"}],
-            [{"text": f"{mark('gameplay')}Gameplay + Facecam Corner", "callback_data": "set_layout_gameplay"}],
+            [{"text": f"{mark('split')}📱 AI Split Screen (Facecam Top + Game)", "callback_data": "set_layout_split"}],
+            [{"text": f"{mark('gameplay')}🎮 AI Gameplay (Facecam Corner + Full Game)", "callback_data": "set_layout_gameplay"}],
+            [{"text": f"{mark('blur')}📐 Pro Blurred Fill (70% Gameplay HD)", "callback_data": "set_layout_blur"}],
+            [{"text": f"{mark('zoom')}🔍 Zoomed In (1080x1920)", "callback_data": "set_layout_zoom"}],
+            [{"text": f"{mark('crop')}✂️ Fill Screen (Center Crop)", "callback_data": "set_layout_crop"}],
             [{"text": "⬅️ Back to Settings", "callback_data": "open_settings"}]
         ]
     }
@@ -1634,6 +1738,24 @@ async def process_video_job(
         total_clips = len(slices)
 
         # STEP 3: RENDER CLIPS (9:16 VERTICAL TRANSCODE WITH HOOK BANNER & CAPTIONS)
+        # AI Facecam / Speaker Detection (Gaming & Webcam Streams)
+        facecam_box = None
+        if ai_enabled and layout_setting in ("split", "gameplay", "blur"):
+            await update_status(
+                "👤 <b>AI Scanning Streamer / Speaker Facecam...</b>\n"
+                "<i>Detecting webcam, reaction camera & speaker box with Gemini Vision...</i>",
+                force=True
+            )
+            try:
+                facecam_box = await asyncio.to_thread(
+                    detect_facecam_ai, target_source, src_w, src_h, total_dur, user_g_key
+                )
+                if facecam_box:
+                    corner = facecam_box.get("corner", "detected")
+                    print(f"[AI Facecam Detected] corner={corner} box={facecam_box}")
+            except Exception as fe:
+                print(f"[Facecam Scan Error] {fe}")
+
         rendered_clips = []
         out_w, out_h = (1080, 1920) if quality_setting == "1080p" else (720, 1280)
 
@@ -1641,11 +1763,23 @@ async def process_video_job(
             cur_meta = clip_meta_list[idx - 1] if idx - 1 < len(clip_meta_list) else None
             hook_text = cur_meta.get("hook", "VIRAL MOMENT!") if cur_meta else "VIRAL MOMENT!"
 
+            # Decide active layout: If facecam found, prioritize Split Screen or Gameplay PiP
+            active_layout = layout_setting
+            if facecam_box:
+                if layout_setting in ("split", "blur"):
+                    active_layout = "split"
+                elif layout_setting == "gameplay":
+                    active_layout = "gameplay"
+
+            layout_desc = "AI Split Screen (Facecam Top)" if (active_layout == "split" and facecam_box) else (
+                "AI Gameplay (Facecam Corner)" if (active_layout == "gameplay" and facecam_box) else active_layout.title()
+            )
+
             await update_status(
                 f"✂️ <b>Rendering 9:16 Vertical Short ({idx}/{total_clips})...</b>\n"
                 f"<code>{render_progress_bar((idx - 0.5) / total_clips * 100, 12)}</code>\n"
                 f"🎯 <b>Viral Hook:</b> <i>{hook_text}</i>\n"
-                f"📐 <b>Layout:</b> {layout_setting.title()} ({out_w}x{out_h})\n"
+                f"📐 <b>Layout:</b> {layout_desc} ({out_w}x{out_h})\n"
                 f"🎨 <b>Captions:</b> Spoken Dialogue Subtitles (Auto Hinglish/English)\n"
                 f"⏱️ <b>Range:</b> {human_time(c_start)} - {human_time(c_end)}",
                 force=True
@@ -1655,17 +1789,39 @@ async def process_video_job(
             clip_out = job_dir / f"{clip_name}.mp4"
             cover_out = job_dir / f"{clip_name}.jpg"
 
-            # Build 9:16 FFmpeg video layout filter (Pro Shorts 70% Layout is default)
-            if layout_setting == "crop":
+            # Build 9:16 FFmpeg video layout filter
+            if active_layout == "split" and facecam_box:
+                # Viral Split Screen: Streamer / Speaker Facecam on Top, Gameplay on Bottom
+                fx, fy, fw, fh = facecam_box["x"], facecam_box["y"], facecam_box["w"], facecam_box["h"]
+                top_h = int(round(out_h * 0.40))  # 768px for 1920
+                bot_h = out_h - top_h             # 1152px
+                vf = (
+                    f"split[v_fc][v_gm];"
+                    f"[v_fc]crop={fw}:{fh}:{fx}:{fy},scale={out_w}:{top_h}:force_original_aspect_ratio=increase,crop={out_w}:{top_h}[top];"
+                    f"[v_gm]scale={out_w}:{bot_h}:force_original_aspect_ratio=increase,crop={out_w}:{bot_h}[bot];"
+                    f"[top][bot]vstack"
+                )
+            elif active_layout == "gameplay" and facecam_box:
+                # PeakCut Signature Gameplay Layout: Full Game + Facecam Corner PiP
+                fx, fy, fw, fh = facecam_box["x"], facecam_box["y"], facecam_box["w"], facecam_box["h"]
+                pip_w = 380 if out_w == 1080 else 260
+                pip_h = max(2, int(round(pip_w * fh / fw)))
+                vf = (
+                    f"split=2[base][fc];"
+                    f"[base]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h}[b];"
+                    f"[fc]crop={fw}:{fh}:{fx}:{fy},scale={pip_w}:{pip_h}[p];"
+                    f"[b][p]overlay={out_w - pip_w - 26}:26"
+                )
+            elif active_layout == "crop":
                 vf = f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h}"
-            elif layout_setting == "zoom":
+            elif active_layout == "zoom":
                 vf = (
                     f"split[a][b];"
                     f"[a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=25:5[bg];"
                     f"[b]scale={out_w}:{int(out_h * 0.85)}:force_original_aspect_ratio=increase,crop={out_w}:{int(out_h * 0.85)}[fg];"
                     f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
                 )
-            else:  # "blur", "gameplay" or default -> Pro Shorts Layout (70% screen height)
+            else:  # "blur" or default Pro Shorts Layout (70% screen height)
                 vf = (
                     f"split[a][b];"
                     f"[a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=25:5,eq=brightness=-0.15[bg];"
@@ -1677,7 +1833,8 @@ async def process_video_job(
             if style_setting != "none" and hook_text:
                 clean_hook = re.sub(r"[^a-zA-Z0-9\s!?'\-\.,]", "", hook_text).strip()
                 if clean_hook:
-                    vf += f",drawtext=text='{clean_hook}':fontcolor=black:fontsize=52:box=1:boxcolor=white@0.95:boxborderw=18:x=(w-text_w)/2:y=140"
+                    hook_y = 110 if (active_layout == "split" and facecam_box) else 140
+                    vf += f",drawtext=text='{clean_hook}':fontcolor=black:fontsize=52:box=1:boxcolor=white@0.95:boxborderw=18:x=(w-text_w)/2:y={hook_y}"
 
             # Burn Spoken Dialogue Subtitles inside video
             ass_file = job_dir / f"subs_{idx}.ass"
