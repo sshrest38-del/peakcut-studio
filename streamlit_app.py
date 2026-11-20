@@ -15,6 +15,17 @@ import httpx
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+# Auto-install essential runtime packages (pproxy and ytdlp-jsc) if missing
+for _pkg in ["pproxy", "ytdlp-jsc"]:
+    try:
+        __import__(_pkg.replace("-", "_"))
+    except ImportError:
+        try:
+            print(f"[Auto-Install] {_pkg} missing, installing via pip...")
+            subprocess.run([sys.executable, "-m", "pip", "install", _pkg], capture_output=True, timeout=60)
+        except Exception:
+            pass
+
 # Streamlit Page Config
 st.set_page_config(
     page_title="PeakCut - AI Viral Video Clipper & Auto Instagram Poster",
@@ -733,8 +744,7 @@ with tab_clipper:
                     ytdlp_cmd = [
                         sys.executable, "-m", "yt_dlp",
                         "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best/18",
-                        "--extractor-args", "youtube:player_client=ios,android,web,mweb",
-                        "--socket-timeout", "15",
+                        "--socket-timeout", "20",
                         "-o", str(source_file),
                         "--no-warnings",
                         "--force-overwrites",
