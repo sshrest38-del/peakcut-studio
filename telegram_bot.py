@@ -58,7 +58,43 @@ TMP_DIR = DATA_DIR / "tmp"
 RENDERS_DIR = DATA_DIR / "renders"
 CONFIG_FILE = ROOT_DIR / "bot_config.json"
 USER_PREFS_FILE = DATA_DIR / "telegram_users.json"
-DENO_BIN = r"C:\Users\harsh\.deno\bin\deno.exe" if Path(r"C:\Users\harsh\.deno\bin\deno.exe").exists() else "deno"
+
+def get_js_runtime_args() -> list:
+    """
+    Locates or auto-downloads a JavaScript runtime (Node.js or Deno)
+    to solve YouTube's EJS / n challenge on video formats.
+    """
+    deno_local = ROOT_DIR / "data" / "bin" / ("deno.exe" if sys.platform == "win32" else "deno")
+    if deno_local.exists():
+        return ["--js-runtimes", f"deno:{deno_local}", "--remote-components", "ejs:github"]
+
+    deno_sys = shutil.which("deno")
+    if deno_sys:
+        return ["--js-runtimes", f"deno:{deno_sys}", "--remote-components", "ejs:github"]
+
+    node_sys = shutil.which("node") or shutil.which("nodejs") or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None)
+    if node_sys:
+        return ["--js-runtimes", f"node:{node_sys}", "--remote-components", "ejs:github"]
+
+    if sys.platform.startswith("linux"):
+        try:
+            bin_dir = ROOT_DIR / "data" / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            deno_bin = bin_dir / "deno"
+            if not deno_bin.exists():
+                print("[Auto-Install] Downloading portable Deno JS runtime for Linux...")
+                url = "https://github.com/denoland/deno/releases/download/v2.1.2/deno-x86_64-unknown-linux-gnu.zip"
+                import urllib.request, zipfile, io
+                resp = urllib.request.urlopen(url, timeout=30)
+                zf = zipfile.ZipFile(io.BytesIO(resp.read()))
+                zf.extract("deno", path=str(bin_dir))
+                os.chmod(str(deno_bin), 0o755)
+            if deno_bin.exists():
+                return ["--js-runtimes", f"deno:{deno_bin}", "--remote-components", "ejs:github"]
+        except Exception as e:
+            print(f"[Deno Auto-Download Warning] {e}")
+
+    return ["--remote-components", "ejs:github"]
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1318,8 +1354,7 @@ async def process_video_job(
                 if pxy and ("surfshark.com" not in pxy.lower()) and pxy.startswith("http"):
                     base_dl_args.extend(["--proxy", pxy])
 
-            if Path(DENO_BIN).exists() or shutil.which("deno"):
-                base_dl_args.extend(["--js-runtimes", f"deno:{DENO_BIN}", "--remote-components", "ejs:github"])
+            base_dl_args.extend(get_js_runtime_args())
             if has_cookies and not tunnel_proxy:
                 base_dl_args.extend(["--cookies", str(cookies_file)])
 
