@@ -131,12 +131,31 @@ def ensure_pproxy_tunnel() -> Optional[str]:
 
 class BotDaemonManager:
     _proc = None
+    _code_ver = "v3.0.0"
+    _started_ver = None
+
+    @classmethod
+    def kill_existing(cls):
+        if cls._proc is not None:
+            try:
+                cls._proc.kill()
+            except Exception:
+                pass
+            cls._proc = None
+        if sys.platform.startswith("linux"):
+            try:
+                subprocess.run(["pkill", "-9", "-f", "telegram_bot.py"], capture_output=True)
+                time.sleep(0.6)
+            except Exception:
+                pass
 
     @classmethod
     def get_or_start(cls):
-        # If process exists and is running, return it
-        if cls._proc is not None and cls._proc.poll() is None:
+        # If process exists, running, and matches current code version, return it
+        if cls._proc is not None and cls._proc.poll() is None and cls._started_ver == cls._code_ver:
             return cls._proc
+
+        cls.kill_existing()
 
         bot_script = ROOT / "telegram_bot.py"
         if not bot_script.exists():
@@ -180,6 +199,7 @@ class BotDaemonManager:
                 text=True,
                 env=env
             )
+            cls._started_ver = cls._code_ver
             return cls._proc
         except Exception as e:
             print(f"[Bot Auto-Start Error] {e}")
@@ -187,18 +207,7 @@ class BotDaemonManager:
 
     @classmethod
     def restart(cls):
-        if cls._proc is not None:
-            try:
-                cls._proc.kill()
-            except Exception:
-                pass
-            cls._proc = None
-        if sys.platform.startswith("linux"):
-            try:
-                subprocess.run(["pkill", "-9", "-f", "telegram_bot.py"], capture_output=True)
-                time.sleep(0.5)
-            except Exception:
-                pass
+        cls.kill_existing()
         return cls.get_or_start()
 
 # Starts once on Streamlit Cloud app boot and self-heals if stopped
