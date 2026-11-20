@@ -11,4 +11,6 @@ uvicorn
 yt-dlp
 pillow
 requests
+requests-toolbelt
+unidecode
 opencv-python-headless
