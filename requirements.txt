@@ -16,3 +16,4 @@ unidecode
 opencv-python-headless
 pproxy
 ytdlp-jsc
+imageio-ffmpeg
