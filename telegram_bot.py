@@ -1956,9 +1956,13 @@ async def process_video_job(
             )
 
             pct_reg = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
-            spd_reg = re.compile(r'at\s+([0-9\.]+[A-Za-z/]+)')
+            spd_reg = re.compile(r'at\s+~?\s*([0-9\.]+\s*[A-Za-z/]+)')
             eta_reg = re.compile(r'ETA\s+([0-9:]+)')
-            size_reg = re.compile(r'of\s+~?([0-9\.]+[A-Za-z]+)')
+            size_reg = re.compile(r'of\s+(?:~\s*)?([0-9\.]+\s*[A-Za-z]+)')
+
+            last_spd = "Calculating..."
+            last_eta = "--:--"
+            last_sz = "Estimating..."
 
             dl_err_lines = []
             while True:
@@ -1974,22 +1978,25 @@ async def process_video_job(
                         dl_err_lines.pop(0)
 
                 p_m = pct_reg.search(line_str)
+                s_m = spd_reg.search(line_str)
+                e_m = eta_reg.search(line_str)
+                sz_m = size_reg.search(line_str)
+
+                if s_m:
+                    last_spd = s_m.group(1).strip()
+                if e_m:
+                    last_eta = e_m.group(1).strip()
+                if sz_m:
+                    last_sz = sz_m.group(1).strip()
+
                 if p_m:
                     p_val = float(p_m.group(1))
-                    s_m = spd_reg.search(line_str)
-                    e_m = eta_reg.search(line_str)
-                    sz_m = size_reg.search(line_str)
-
-                    spd = s_m.group(1) if s_m else "N/A"
-                    eta = e_m.group(1) if e_m else "N/A"
-                    sz = sz_m.group(1) if sz_m else "N/A"
-
                     p_bar = render_progress_bar(p_val, length=12)
                     status_text = (
                         f"📥 <b>Downloading YouTube Video...</b>\n"
                         f"<code>{p_bar}</code>\n"
-                        f"⚡ <b>Speed:</b> {spd} | ⏳ <b>ETA:</b> {eta}\n"
-                        f"📦 <b>Size:</b> {sz}\n"
+                        f"⚡ <b>Speed:</b> {last_spd} | ⏳ <b>ETA:</b> {last_eta}\n"
+                        f"📦 <b>Size:</b> {last_sz}\n"
                         f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
                     )
                     await update_status(status_text)
@@ -2029,6 +2036,9 @@ async def process_video_job(
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT
                     )
+                    last_spd2 = "Calculating..."
+                    last_eta2 = "--:--"
+                    last_sz2 = "Estimating..."
                     while True:
                         line2 = await proc2.stdout.readline()
                         if not line2:
@@ -2039,15 +2049,24 @@ async def process_video_job(
                             if len(dl_err_lines) > 25:
                                 dl_err_lines.pop(0)
                         p_m2 = pct_reg.search(l_str)
+                        s_m2 = spd_reg.search(l_str)
+                        e_m2 = eta_reg.search(l_str)
+                        sz_m2 = size_reg.search(l_str)
+
+                        if s_m2:
+                            last_spd2 = s_m2.group(1).strip()
+                        if e_m2:
+                            last_eta2 = e_m2.group(1).strip()
+                        if sz_m2:
+                            last_sz2 = sz_m2.group(1).strip()
+
                         if p_m2:
                             p_val = float(p_m2.group(1))
-                            s_m = spd_reg.search(l_str)
-                            e_m = eta_reg.search(l_str)
-                            sz_m = size_reg.search(l_str)
                             status_text = (
-                                f"📥 <b>Downloading YouTube Video (Mobile Stream)...</b>\n"
+                                f"📥 <b>Downloading YouTube Video...</b>\n"
                                 f"<code>{render_progress_bar(p_val, 12)}</code>\n"
-                                f"⚡ <b>Speed:</b> {s_m.group(1) if s_m else 'N/A'} | ⏳ <b>ETA:</b> {e_m.group(1) if e_m else 'N/A'}\n"
+                                f"⚡ <b>Speed:</b> {last_spd2} | ⏳ <b>ETA:</b> {last_eta2}\n"
+                                f"📦 <b>Size:</b> {last_sz2}\n"
                                 f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
                             )
                             await update_status(status_text)
