@@ -1185,6 +1185,59 @@ async def download_via_desi_api(url: str, dest_file: Path, progress_callback=Non
         print(f"[DESI API Error] {e}")
     return None
 
+_PPROXY_PROC = None
+
+def ensure_pproxy_tunnel() -> Optional[str]:
+    """
+    Spawns a local pproxy daemon listening on 127.0.0.1:8125 that bridges
+    to Surfshark HTTPS proxy on in-mum.prod.surfshark.com:443.
+    """
+    global _PPROXY_PROC
+    if _PPROXY_PROC is not None and _PPROXY_PROC.poll() is None:
+        return "http://127.0.0.1:8125"
+
+    upstream = os.environ.get("SURFSHARK_PROXY", "").strip()
+    if not upstream:
+        sec_file = ROOT_DIR / ".streamlit" / "secrets.toml"
+        if sec_file.exists():
+            try:
+                for line in sec_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("SURFSHARK_PROXY") and "=" in line:
+                        upstream = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+            except Exception:
+                pass
+
+    if not upstream or "amark" in upstream:
+        upstream = "http+ssl://in-mum.prod.surfshark.com:443#9wPLNgvh3BzX7Bp4AhkMVcam:G7YDFVncQSzp6SENwjJAS2Mu"
+
+    # Normalize upstream format if provided as https://user:pass@host:443
+    if upstream.startswith("http://") or upstream.startswith("https://"):
+        m = re.match(r'https?://([^:]+):([^@]+)@([^:/]+):?(\d+)?', upstream)
+        if m:
+            u, p, h, pt = m.groups()
+            pt = pt or "443"
+            upstream = f"http+ssl://{h}:{pt}#{u}:{p}"
+
+    try:
+        cmd = [
+            sys.executable, "-m", "pproxy",
+            "-l", "http://127.0.0.1:8125",
+            "-r", upstream
+        ]
+        _PPROXY_PROC = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        time.sleep(0.8)
+        if _PPROXY_PROC.poll() is None:
+            return "http://127.0.0.1:8125"
+    except Exception as e:
+        print(f"[PProxy Warning] Could not start pproxy tunnel: {e}")
+    return None
+
 # ----------------- VIDEO PROCESSING PIPELINE -----------------
 
 async def process_video_job(
@@ -1238,10 +1291,16 @@ async def process_video_job(
                 "--extractor-args", "youtube:player_client=ios,android,web,mweb",
                 "--socket-timeout", "15"
             ]
-            bot_cfg = load_bot_config()
-            pxy = bot_cfg.get("proxy", "").strip()
-            if pxy and ("surfshark.com" not in pxy.lower()) and pxy.startswith("http"):
-                base_dl_args.extend(["--proxy", pxy])
+            # Route downloads through Surfshark Mumbai HTTPS Proxy via local pproxy tunnel
+            tunnel_proxy = ensure_pproxy_tunnel()
+            if tunnel_proxy:
+                base_dl_args.extend(["--proxy", tunnel_proxy])
+            elif not is_local_file:
+                bot_cfg = load_bot_config()
+                pxy = bot_cfg.get("proxy", "").strip()
+                if pxy and ("surfshark.com" not in pxy.lower()) and pxy.startswith("http"):
+                    base_dl_args.extend(["--proxy", pxy])
+
             if Path(DENO_BIN).exists() or shutil.which("deno"):
                 base_dl_args.extend(["--js-runtimes", f"deno:{DENO_BIN}", "--remote-components", "ejs:github"])
             if has_cookies:
