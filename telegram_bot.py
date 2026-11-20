@@ -1536,11 +1536,11 @@ async def process_video_job(
 
             has_cookies = cookies_file.exists() and cookies_file.stat().st_size > 20
 
-            # Direct fast extraction with anti-403 YouTube client settings
+            # Direct fast extraction with web client (matched to cookies)
             base_dl_args = [
                 "--no-check-certificates",
                 "--socket-timeout", "20",
-                "--extractor-args", "youtube:player_client=android,web"
+                "--extractor-args", "youtube:player_client=web,default"
             ]
             try:
                 import curl_cffi
@@ -1644,8 +1644,93 @@ async def process_video_job(
 
             await process.wait()
 
+            # ATTEMPT 2: Fallback to Android Native Extractor (Bypasses 403 Forbidden without cookies)
+            if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
+                await update_status(
+                    "🔄 <b>Retrying with Mobile Stream Engine...</b>\n"
+                    "<i>Bypassing 403 Forbidden with direct stream extraction...</i>",
+                    force=True
+                )
+                alt_dl_cmd = [
+                    sys.executable, "-m", "yt_dlp",
+                    "--no-check-certificates",
+                    "--socket-timeout", "20",
+                    "--extractor-args", "youtube:player_client=android",
+                    "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/b",
+                    "--merge-output-format", "mp4",
+                    "--write-auto-sub", "--write-sub",
+                    "--sub-lang", "hi-orig,hi,en-orig,en",
+                    "--sub-format", "json3",
+                    "-o", str(raw_source_file),
+                    "--newline",
+                    source_url_or_path
+                ]
+                proc2 = await asyncio.create_subprocess_exec(
+                    *alt_dl_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT
+                )
+                while True:
+                    line2 = await proc2.stdout.readline()
+                    if not line2:
+                        break
+                    l_str = line2.decode('utf-8', errors='ignore')
+                    dl_err_lines.append(l_str.strip())
+                    p_m2 = pct_reg.search(l_str)
+                    if p_m2:
+                        p_val = float(p_m2.group(1))
+                        s_m = spd_reg.search(l_str)
+                        e_m = eta_reg.search(l_str)
+                        sz_m = size_reg.search(l_str)
+                        status_text = (
+                            f"📥 <b>Downloading YouTube Video (Mobile Stream)...</b>\n"
+                            f"<code>{render_progress_bar(p_val, 12)}</code>\n"
+                            f"⚡ <b>Speed:</b> {s_m.group(1) if s_m else 'N/A'} | ⏳ <b>ETA:</b> {e_m.group(1) if e_m else 'N/A'}\n"
+                            f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
+                        )
+                        await update_status(status_text)
+                await proc2.wait()
+
+            # ATTEMPT 3: If still not downloaded, fallback to Cloudflare Workers Desi API
+            if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
+                await update_status(
+                    "⚡ <b>Connecting to High-Speed Cloudflare Edge Engine...</b>\n"
+                    "<i>Fetching direct video stream via Cloudflare Workers CDN...</i>",
+                    force=True
+                )
+                def desi_progress(dl, total, pct, spd, eta):
+                    asyncio.create_task(update_status(
+                        f"📥 <b>Downloading via Cloudflare CDN...</b>\n"
+                        f"<code>{render_progress_bar(pct, 12)}</code>\n"
+                        f"⚡ <b>Speed:</b> {human_bytes(spd)}/s | ⏳ <b>ETA:</b> {int(eta)}s\n"
+                        f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
+                    ))
+                try:
+                    desi_meta = await download_via_desi_api(source_url_or_path, raw_source_file, progress_callback=desi_progress)
+                    if desi_meta and desi_meta.get("title"):
+                        video_title = desi_meta["title"]
+                except Exception as de:
+                    print(f"[Desi API Exception] {de}")
+
             # Automatically parse downloaded json3 subtitles
             sub_candidates = list(job_dir.glob("*.json3"))
+            if not sub_candidates:
+                try:
+                    # Quick separate subtitle fetch
+                    subprocess.run([
+                        sys.executable, "-m", "yt_dlp",
+                        "--no-check-certificates",
+                        "--skip-download",
+                        "--write-auto-sub", "--write-sub",
+                        "--sub-lang", "hi-orig,hi,en-orig,en",
+                        "--sub-format", "json3",
+                        "-o", str(job_dir / "sub"),
+                        source_url_or_path
+                    ], capture_output=True, timeout=15)
+                    sub_candidates = list(job_dir.glob("*.json3"))
+                except Exception:
+                    pass
+
             chosen_sub = None
             for s_f in sorted(sub_candidates, key=lambda p: (0 if "hi" in p.name.lower() else (1 if "en" in p.name.lower() else 2))):
                 chosen_sub = s_f
