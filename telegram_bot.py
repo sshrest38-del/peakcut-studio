@@ -175,10 +175,10 @@ def load_bot_config() -> dict:
         except Exception:
             pass
 
-    _FALLBACK_BOT_TOKEN = base64.b64decode("OTA0NzE5ODk1ODpBQUZmNno2Ykx5aERaTnp3cFg2MUpLZUZBU3FNdmVOYzNzWQ==").decode()
-    _FALLBACK_GEMINI_KEY = base64.b64decode("QVEuQWI4Uk42TEw2UE83dzVMZ09GYW12eTMzcE45cWlUaG5xRnVjNkoyVHFQM0RQWXU0VGc=").decode()
-    _FALLBACK_ZERNIO_KEY = base64.b64decode("c2tfYTM5OWMwOWFkNTk2NmU2NzY4ZTI5N2VlMTJiYTBhODg4NjdhMTZjZGMxYzVjMjc5ZTg2Yjk3M2Y1YjFiMDIyMQ==").decode()
-    _FALLBACK_ZERNIO_ACC = "6affe7338ae0a5730bcf4ec4"
+    _FALLBACK_BOT_TOKEN = ""
+    _FALLBACK_GEMINI_KEY = ""
+    _FALLBACK_ZERNIO_KEY = ""
+    _FALLBACK_ZERNIO_ACC = ""
     _FALLBACK_PROXY = ""
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("bot_token") or _FALLBACK_BOT_TOKEN
@@ -481,16 +481,14 @@ def batch_convert_snippets_to_hinglish(snippets: list, gemini_key: str = "") -> 
 
 def transcribe_clip_audio_with_gemini(audio_path: Path, gemini_key: str, clip_offset: float = 0.0) -> list:
     """
-    Transcribes audio clip using Gemini multimodal API and returns SubtitleSnippet list.
+    Transcribes audio clip using Gemini REST API (no external SDK required) and returns SubtitleSnippet list.
     """
     snippets = []
     if not audio_path.exists() or not gemini_key:
         return snippets
     try:
-        from google import genai
-        client = genai.Client(api_key=gemini_key)
-        uploaded = client.files.upload(file=str(audio_path))
-        prompt = (
+        audio_b64 = base64.b64encode(audio_path.read_bytes()).decode('utf-8')
+        prompt_text = (
             "Listen to this audio. If the audio is Hindi, transcribe it directly into Roman Hinglish (English letters). "
             "If it is English, transcribe in clean English. "
             "Return timestamped lines in this exact format:\n"
@@ -499,22 +497,50 @@ def transcribe_clip_audio_with_gemini(audio_path: Path, gemini_key: str, clip_of
             "1.2 - 3.5: ARE BHAI DEKHO KYA HUA\n"
             "3.5 - 6.0: GUYS FIGHT HO GAYI"
         )
-        for m_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        payload = {
+            "contents": [{
+                "parts": [
+                    {
+                        "inline_data": {
+                            "mime_type": "audio/mp3",
+                            "data": audio_b64
+                        }
+                    },
+                    {
+                        "text": prompt_text
+                    }
+                ]
+            }]
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": gemini_key
+        }
+        for m_name in ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"]:
             try:
-                resp = client.models.generate_content(model=m_name, contents=[uploaded, prompt])
-                if resp and resp.text:
-                    for line in resp.text.splitlines():
-                        m = re.search(r'(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\s*:\s*(.+)', line)
-                        if m:
-                            s_t = float(m.group(1)) + clip_offset
-                            e_t = float(m.group(2)) + clip_offset
-                            d_t = max(0.5, e_t - s_t)
-                            t_val = m.group(3).strip().upper()
-                            if t_val:
-                                snippets.append(SubtitleSnippet(t_val, s_t, d_t))
-                    if snippets:
-                        break
-            except Exception:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
+                with httpx.Client(timeout=35.0, trust_env=False) as client:
+                    resp = client.post(url, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    resp_json = resp.json()
+                    candidates = resp_json.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        resp_text = "".join(p.get("text", "") for p in parts if "text" in p)
+                        if resp_text:
+                            for line in resp_text.splitlines():
+                                m = re.search(r'(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\s*:\s*(.+)', line)
+                                if m:
+                                    s_t = float(m.group(1)) + clip_offset
+                                    e_t = float(m.group(2)) + clip_offset
+                                    d_t = max(0.5, e_t - s_t)
+                                    t_val = m.group(3).strip().upper()
+                                    if t_val:
+                                        snippets.append(SubtitleSnippet(t_val, s_t, d_t))
+                            if snippets:
+                                break
+            except Exception as me:
+                print(f"[Gemini REST {m_name} Error] {me}")
                 continue
     except Exception as e:
         print(f"[Gemini Audio Transcribe Exception] {e}")
@@ -533,8 +559,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Bounce,Arial,DejaVu Sans,Liberation Sans,sans-serif,56,&H0000F0FF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,5,0,0,0,1
-Style: Clean,Arial,DejaVu Sans,Liberation Sans,sans-serif,50,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,0,5,0,0,0,1
+Style: Bounce,DejaVu Sans,56,&H0000F0FF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,5,0,0,0,1
+Style: Clean,DejaVu Sans,50,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,0,5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1742,8 +1768,8 @@ def ensure_pproxy_tunnel() -> Optional[str]:
             except Exception:
                 pass
 
-    if not upstream or "amark" in upstream:
-        upstream = "http+ssl://in-mum.prod.surfshark.com:443#9wPLNgvh3BzX7Bp4AhkMVcam:G7YDFVncQSzp6SENwjJAS2Mu"
+    if not upstream:
+        return None
 
     # Normalize upstream format if provided as https://user:pass@host:443
     if upstream.startswith("http://") or upstream.startswith("https://"):
@@ -1866,9 +1892,43 @@ async def process_video_job(
             # Everything every attempt shares: a JavaScript runtime for YouTube's challenges and
             # TLS impersonation. Cookies, the player client and the proxy are picked per attempt,
             # because the iOS fallback needs a different mix of them.
+            def parse_speed_kib(spd_str: str) -> float:
+                if not spd_str or spd_str in ("N/A", "Unknown", "Calculating..."):
+                    return -1.0
+                m = re.search(r'([0-9\.]+)\s*([A-Za-z/]+)', spd_str)
+                if not m:
+                    return -1.0
+                try:
+                    val = float(m.group(1))
+                    unit = m.group(2).lower()
+                    if 'gib' in unit or 'gb' in unit:
+                        return val * 1024 * 1024
+                    if 'mib' in unit or 'mb' in unit:
+                        return val * 1024
+                    if 'kib' in unit or 'kb' in unit:
+                        return val
+                    if 'b/s' in unit or 'b' in unit:
+                        return val / 1024
+                    return val
+                except Exception:
+                    return -1.0
+
+            def cleanup_partial_sources(d: Path):
+                for pf in d.glob("source*"):
+                    if pf.suffix.lower() != ".json3":
+                        try:
+                            if pf.is_file():
+                                pf.unlink()
+                        except Exception:
+                            pass
+
             common_args = [
                 "--no-check-certificates",
                 "--socket-timeout", "20",
+                "--concurrent-fragments", "8",
+                "--http-chunk-size", "10M",
+                "--retries", "5",
+                "--fragment-retries", "5",
             ]
             try:
                 import curl_cffi
@@ -1932,8 +1992,10 @@ async def process_video_job(
             if fetched_t:
                 video_title = fetched_t
 
-            # Format selector: best video up to 1080p + best audio, auto merged to mp4
-            format_selector = "bv*[height<=1080]+ba/b[height<=1080]/best"
+            # Format selector: default height<=720, 1080 only when quality setting is 1080p
+            q_pref = str(pref.get("quality", "")).lower()
+            max_h = "1080" if q_pref in ("1080", "1080p") else "720"
+            format_selector = f"bv*[height<={max_h}]+ba/b[height<={max_h}]/best"
             dl_cmd = [
                 sys.executable, "-m", "yt_dlp",
                 *base_dl_args,
@@ -1964,6 +2026,8 @@ async def process_video_job(
             last_spd = "Calculating..."
             last_eta = "--:--"
             last_sz = "Estimating..."
+            slow_start = None
+            cur_p = 0.0
 
             dl_err_lines = []
             while True:
@@ -1991,8 +2055,8 @@ async def process_video_job(
                     last_sz = sz_m.group(1).strip()
 
                 if p_m:
-                    p_val = float(p_m.group(1))
-                    p_bar = render_progress_bar(p_val, length=12)
+                    cur_p = float(p_m.group(1))
+                    p_bar = render_progress_bar(cur_p, length=12)
                     status_text = (
                         f"📥 <b>Downloading YouTube Video...</b>\n"
                         f"<code>{p_bar}</code>\n"
@@ -2002,20 +2066,37 @@ async def process_video_job(
                     )
                     await update_status(status_text)
 
-            await process.wait()
+                spd_val = parse_speed_kib(last_spd)
+                if spd_val >= 0 and spd_val < 150.0 and cur_p < 90.0:
+                    if slow_start is None:
+                        slow_start = time.time()
+                    elif time.time() - slow_start >= 25.0:
+                        print(f"[Download Watchdog] Speed below 150 KiB/s ({last_spd}) for 25s. Killing process.")
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                        break
+                elif spd_val >= 150.0:
+                    slow_start = None
 
-            # ATTEMPT 2: the iOS client, which needs no proof-of-token. Cookies are left out on
-            # purpose: yt-dlp drops the iOS client when they are passed, and with no client left
-            # the download has no video formats at all ("Only images are available"). The JS
-            # runtime and impersonation are kept, so YouTube's challenges still get solved. The
-            # same try is made through the tunnel and then straight from this machine, so a
-            # broken tunnel cannot end the job on its own.
+            await process.wait()
+            if not raw_source_file.exists() or raw_source_file.stat().st_size == 0 or (slow_start and time.time() - slow_start >= 25.0):
+                cleanup_partial_sources(job_dir)
+
+            # ATTEMPT 2: the iOS / TV client, which needs no proof-of-token.
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
-                variants = [(tunnel_args, "through the VPN tunnel")] if tunnel_args else []
+                variants = []
+                if tunnel_args:
+                    variants.append((tunnel_args, "through the VPN tunnel"))
                 variants.append((base_dl_args, "straight from this machine"))
+                if pxy:
+                    variants.append((common_args, "without any proxy"))
+
                 for v_args, where in variants:
                     if raw_source_file.exists() and raw_source_file.stat().st_size > 0:
                         break
+                    cleanup_partial_sources(job_dir)
                     await update_status(
                         "🔄 <b>Retrying with Zero-Cookies TV Stream Engine...</b>\n"
                         f"<i>Streaming video directly without cookies {where}...</i>",
@@ -2026,7 +2107,7 @@ async def process_video_job(
                         *v_args,
                         "--no-cookies",
                         "--extractor-args", "youtube:player_client=tv_embedded,tv,visionos",
-                        "-f", "bv*[height<=1080]+ba/b[height<=1080]/best",
+                        "-f", format_selector,
                         "--merge-output-format", "mp4",
                         "-o", str(raw_source_file),
                         "--newline",
@@ -2040,6 +2121,8 @@ async def process_video_job(
                     last_spd2 = "Calculating..."
                     last_eta2 = "--:--"
                     last_sz2 = "Estimating..."
+                    slow_start2 = None
+                    cur_p2 = 0.0
                     while True:
                         line2 = await proc2.stdout.readline()
                         if not line2:
@@ -2062,19 +2145,37 @@ async def process_video_job(
                             last_sz2 = sz_m2.group(1).strip()
 
                         if p_m2:
-                            p_val = float(p_m2.group(1))
+                            cur_p2 = float(p_m2.group(1))
                             status_text = (
                                 f"📥 <b>Downloading YouTube Video...</b>\n"
-                                f"<code>{render_progress_bar(p_val, 12)}</code>\n"
+                                f"<code>{render_progress_bar(cur_p2, 12)}</code>\n"
                                 f"⚡ <b>Speed:</b> {last_spd2} | ⏳ <b>ETA:</b> {last_eta2}\n"
                                 f"📦 <b>Size:</b> {last_sz2}\n"
                                 f"🎬 <b>Title:</b> <i>{video_title[:35]}</i>"
                             )
                             await update_status(status_text)
-                    await proc2.wait()
 
-            # ATTEMPT 3: If still not downloaded, fallback to Cloudflare Workers Desi API
-            if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
+                        spd_val2 = parse_speed_kib(last_spd2)
+                        if spd_val2 >= 0 and spd_val2 < 150.0 and cur_p2 < 90.0:
+                            if slow_start2 is None:
+                                slow_start2 = time.time()
+                            elif time.time() - slow_start2 >= 25.0:
+                                print(f"[Download Watchdog 2] Speed below 150 KiB/s ({last_spd2}) for 25s. Killing proc2.")
+                                try:
+                                    proc2.kill()
+                                except Exception:
+                                    pass
+                                break
+                        elif spd_val2 >= 150.0:
+                            slow_start2 = None
+
+                    await proc2.wait()
+                    if not raw_source_file.exists() or raw_source_file.stat().st_size == 0 or (slow_start2 and time.time() - slow_start2 >= 25.0):
+                        cleanup_partial_sources(job_dir)
+
+            # ATTEMPT 3: If still not downloaded, fallback to Cloudflare Workers Desi API (only if explicitly enabled)
+            allow_third_party = os.environ.get("PEAKCUT_ALLOW_THIRD_PARTY_DL", "0").strip() == "1"
+            if allow_third_party and (not raw_source_file.exists() or raw_source_file.stat().st_size == 0):
                 await update_status(
                     "⚡ <b>Connecting to High-Speed Cloudflare Edge Engine...</b>\n"
                     "<i>Fetching direct video stream via Cloudflare Workers CDN...</i>",
@@ -2349,10 +2450,12 @@ async def process_video_job(
 
             # Add Bold Hook Banner on top of video if style is enabled
             if style_setting != "none" and hook_text:
-                clean_hook = re.sub(r"[^a-zA-Z0-9\s!?'\-\.,]", "", hook_text).strip()
+                clean_hook = re.sub(r"[^a-zA-Z0-9\s!?\-\.]", "", hook_text).strip()
                 if clean_hook:
                     hook_y = 110 if (active_layout == "split" and facecam_box) else 140
-                    vf += f",drawtext=text='{clean_hook}':fontcolor=black:fontsize=52:box=1:boxcolor=white@0.95:boxborderw=18:x=(w-text_w)/2:y={hook_y}"
+                    dejavu_bold = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+                    font_arg = f":fontfile='{dejavu_bold.as_posix()}'" if dejavu_bold.exists() else ""
+                    vf += f",drawtext=text='{clean_hook}'{font_arg}:fontcolor=black:fontsize=52:box=1:boxcolor=white@0.95:boxborderw=18:x=(w-text_w)/2:y={hook_y}"
 
             # Burn Spoken Dialogue Subtitles inside video
             ass_file = job_dir / f"subs_{idx}.ass"
@@ -2367,7 +2470,7 @@ async def process_video_job(
                     try:
                         clip_audio = job_dir / f"audio_clip_{idx}.mp3"
                         subprocess.run([
-                            "ffmpeg", "-y", "-ss", f"{c_start:.2f}", "-to", f"{c_end:.2f}",
+                            _FFMPEG_BIN, "-y", "-ss", f"{c_start:.2f}", "-to", f"{c_end:.2f}",
                             "-i", str(target_source), "-vn", "-acodec", "libmp3lame",
                             "-ar", "16000", "-ac", "1", str(clip_audio)
                         ], capture_output=True)
