@@ -173,7 +173,7 @@ def get_js_runtime_args() -> list:
         ]
         for kind, exe in candidates:
             if exe and _starts_here(exe):
-                _JS_RUNTIME_ARGS = ["--js-runtimes", f"{kind}:{exe}", "--remote-components", "ejs:github"]
+                _JS_RUNTIME_ARGS = ["--js-runtimes", f"{kind}:{exe}"]
                 break
     return list(_JS_RUNTIME_ARGS)
 
@@ -2133,6 +2133,7 @@ async def process_video_job(
             common_args = [
                 "--no-check-certificates",
                 "--socket-timeout", "20",
+                "--no-playlist",
                 "--concurrent-fragments", "8",
                 "--retries", "5",
                 "--fragment-retries", "5",
@@ -2154,34 +2155,6 @@ async def process_video_job(
             # Do not force client to avoid PO token failures
             client_args = []
 
-            await update_status("🔍 <b>Connecting to High-Speed Stream Extractor...</b>\n<code>Analyzing video stream and subtitles...</code>", force=True)
-
-            def fetch_info():
-                try:
-                    cmd = [
-                        sys.executable, "-m", "yt_dlp",
-                        *base_dl_args,
-                        *cookie_args,
-                        *client_args,
-                        "--no-warnings",
-                        "--print", "title",
-                        "--print", "duration",
-                        source_url_or_path
-                    ]
-                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                    if p.returncode == 0 and p.stdout.strip():
-                        lines = [x.strip() for x in p.stdout.strip().splitlines() if x.strip()]
-                        t = lines[0] if len(lines) > 0 else ""
-                        d = float(lines[1]) if len(lines) > 1 and lines[1].replace(".", "").isdigit() else 0.0
-                        return t, d
-                except Exception:
-                    pass
-                return "", 0.0
-
-            fetched_t, fetched_d = await asyncio.to_thread(fetch_info)
-            if fetched_t:
-                video_title = fetched_t
-
             # Format selector: default height<=720, 1080 only when quality setting is 1080p
             q_pref = str(pref.get("quality", "")).lower()
             max_h = "1080" if q_pref in ("1080", "1080p") else "720"
@@ -2191,6 +2164,7 @@ async def process_video_job(
                 *base_dl_args,
                 *cookie_args,
                 *client_args,
+                "--print", "before_dl:title:%(title)s",
                 "-f", format_selector,
                 "--merge-output-format", "mp4",
                 "--write-auto-sub", "--write-sub",
@@ -2201,6 +2175,8 @@ async def process_video_job(
                 "--newline",
                 source_url_or_path
             ]
+
+            await update_status("⚡ <b>Analyzing Stream & Initializing Download...</b>\n<code>Connecting to high-speed stream engine...</code>", force=True)
 
             process = await asyncio.create_subprocess_exec(
                 *dl_cmd,
@@ -2225,6 +2201,10 @@ async def process_video_job(
                 if not line:
                     break
                 line_str = line.decode('utf-8', errors='ignore')
+                if line_str.startswith("title:"):
+                    extracted_title = line_str.replace("title:", "").strip()
+                    if extracted_title:
+                        video_title = extracted_title
                 if any(k in line_str for k in ("ERROR", "WARNING", "Sign in", "TransportError")):
                     dl_err_lines.append(line_str.strip())
                     if len(dl_err_lines) > 25:
@@ -2292,6 +2272,7 @@ async def process_video_job(
                         sys.executable, "-m", "yt_dlp",
                         *v_args,
                         "--no-cookies",
+                        "--print", "before_dl:title:%(title)s",
                         "--extractor-args", "youtube:player_client=web_safari,tv,mweb,android_vr",
                         "-f", format_selector,
                         "--merge-output-format", "mp4",
@@ -2314,6 +2295,10 @@ async def process_video_job(
                         if not line2:
                             break
                         l_str = line2.decode('utf-8', errors='ignore')
+                        if l_str.startswith("title:"):
+                            extracted_title2 = l_str.replace("title:", "").strip()
+                            if extracted_title2:
+                                video_title = extracted_title2
                         if any(k in l_str for k in ("ERROR", "WARNING", "Sign in", "TransportError")):
                             dl_err_lines.append(l_str.strip())
                             if len(dl_err_lines) > 25:
