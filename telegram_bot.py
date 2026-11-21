@@ -2145,14 +2145,15 @@ async def process_video_job(
                 pass
             common_args.extend(get_js_runtime_args())
 
-            # No proxy on cloud server; ensure direct connection
-            pxy = ""
-            base_dl_args = list(common_args)
+            # If local PO token server is active, hook yt-dlp bgutil plugin to 127.0.0.1:4416
+            pot_active = _tunnel_listening(4416)
+            pot_args = ["--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"] if pot_active else []
+            base_dl_args = list(common_args) + pot_args
             tunnel_args = None
 
             cookie_args = ["--cookies", str(cookies_file)] if has_cookies else []
 
-            # Do not force client to avoid PO token failures
+            # Client arguments
             client_args = []
 
             # Format selector: default height<=720, 1080 only when quality setting is 1080p
@@ -2273,7 +2274,7 @@ async def process_video_job(
                         *v_args,
                         "--no-cookies",
                         "--print", "before_dl:title:%(title)s",
-                        "--extractor-args", "youtube:player_client=web_safari,tv,mweb,android_vr",
+                        "--extractor-args", f"{'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416;' if pot_active else ''}youtube:player_client=android_vr,web,mweb,tv",
                         "-f", format_selector,
                         "--merge-output-format", "mp4",
                         "-o", str(raw_source_file),
