@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 # Auto-install essential runtime packages if missing
-for _pkg in ["ytdlp-jsc", "imageio-ffmpeg", "deno", "yt-dlp-ejs"]:
+for _pkg in ["ytdlp-jsc", "imageio-ffmpeg", "yt-dlp-ejs"]:
     try:
         __import__(_pkg.replace("-", "_"))
     except ImportError:
@@ -169,7 +169,7 @@ def _tunnel_listening(port: int = 8125) -> bool:
 
 class BotDaemonManager:
     _proc = None
-    _code_ver = "v5.3.5"
+    _code_ver = "v5.3.6"
     _started_ver = None
 
     @classmethod
@@ -784,8 +784,10 @@ with tab_clipper:
                     except Exception:
                         pass
 
+                    pot_opt = "youtubepot-bgutilscript:disable=1;youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416" if _tunnel_listening(4416) else "youtubepot-bgutilscript:disable=1;youtubepot-bgutilhttp:disable=1"
                     ytdlp_cmd = [
                         sys.executable, "-m", "yt_dlp",
+                        "--extractor-args", pot_opt,
                         "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best/18/b",
                         "--socket-timeout", "20",
                         "-o", str(source_file),
