@@ -185,7 +185,7 @@ def _tunnel_listening(port: int = 8125) -> bool:
 
 class BotDaemonManager:
     _proc = None
-    _code_ver = "v5.3.0"
+    _code_ver = "v5.3.1"
     _started_ver = None
 
     @classmethod
@@ -216,14 +216,20 @@ class BotDaemonManager:
             return None
         try:
             env = dict(os.environ)
-            # Pass st.secrets into subprocess env
+            # Pass all st.secrets into subprocess env with alias normalization
             try:
-                for k in [
-                    "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY", "ZERNIO_API_KEY",
-                    "ZERNIO_ACCOUNT_ID"
-                ]:
-                    if k in st.secrets:
-                        env[k] = str(st.secrets[k])
+                for k in st.secrets:
+                    val = str(st.secrets[k]).strip()
+                    env[k] = val
+                    if k in ("_FALLBACK_BOT_TOKEN", "FALLBACK_BOT_TOKEN", "BOT_TOKEN"):
+                        env.setdefault("TELEGRAM_BOT_TOKEN", val)
+                    elif k in ("_FALLBACK_GEMINI_KEY", "FALLBACK_GEMINI_KEY", "GEMINI_API_KEYS"):
+                        env.setdefault("GEMINI_API_KEY", val)
+                        env.setdefault("GEMINI_API_KEYS", val)
+                    elif k in ("_FALLBACK_ZERNIO_KEY", "FALLBACK_ZERNIO_KEY", "ZERNIO_KEY"):
+                        env.setdefault("ZERNIO_API_KEY", val)
+                    elif k in ("_FALLBACK_ZERNIO_ACC", "FALLBACK_ZERNIO_ACC", "ZERNIO_ACC"):
+                        env.setdefault("ZERNIO_ACCOUNT_ID", val)
             except Exception:
                 pass
 
