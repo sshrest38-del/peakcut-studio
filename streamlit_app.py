@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 # Auto-install essential runtime packages if missing
-for _pkg in ["pproxy", "ytdlp-jsc", "imageio-ffmpeg"]:
+for _pkg in ["ytdlp-jsc", "imageio-ffmpeg"]:
     try:
         __import__(_pkg.replace("-", "_"))
     except ImportError:
@@ -120,59 +120,6 @@ def ensure_pproxy_tunnel() -> Optional[str]:
     Spawns a local pproxy daemon listening on 127.0.0.1:8125 that bridges
     to Surfshark HTTPS proxy on in-mum.prod.surfshark.com:443.
     """
-    global _PPROXY_PROC
-    if _PPROXY_PROC is not None and _PPROXY_PROC.poll() is None:
-        return "http://127.0.0.1:8125"
-
-    # Auto-install pproxy if missing in the environment
-    try:
-        import pproxy
-    except ImportError:
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "pproxy"], capture_output=True, timeout=60)
-            import pproxy
-        except Exception:
-            pass
-
-    upstream = os.environ.get("SURFSHARK_PROXY", "").strip()
-    if not upstream and hasattr(st, "secrets") and "SURFSHARK_PROXY" in st.secrets:
-        upstream = str(st.secrets["SURFSHARK_PROXY"]).strip()
-
-    if not upstream:
-        return None
-
-    if upstream.startswith("http://") or upstream.startswith("https://"):
-        m = re.match(r'https?://([^:]+):([^@]+)@([^:/]+):?(\d+)?', upstream)
-        if m:
-            u, p, h, pt = m.groups()
-            pt = pt or "443"
-            upstream = f"http+ssl://{h}:{pt}#{u}:{p}"
-
-    try:
-        p_log = DATA_DIR / "pproxy.log"
-        p_out = open(p_log, "a", encoding="utf-8")
-        cmd = [
-            sys.executable, "-m", "pproxy",
-            "-l", "http://127.0.0.1:8125",
-            "-r", upstream,
-            "-v"
-        ]
-        _PPROXY_PROC = subprocess.Popen(
-            cmd,
-            stdout=p_out,
-            stderr=p_out
-        )
-        time.sleep(1.2)
-        if _PPROXY_PROC.poll() is None:
-            return "http://127.0.0.1:8125"
-    except Exception as e:
-        print(f"[PProxy Warning] Could not start pproxy tunnel: {e}")
-
-    # A tunnel left over from an earlier run may already hold the port, which makes a new one
-    # exit at once. If something is answering there, that is the tunnel: use it rather than
-    # quietly going out without the VPN, which is what YouTube refuses.
-    if _tunnel_listening():
-        return "http://127.0.0.1:8125"
     return None
 
 
@@ -185,7 +132,7 @@ def _tunnel_listening(port: int = 8125) -> bool:
 
 class BotDaemonManager:
     _proc = None
-    _code_ver = "v5.3.1"
+    _code_ver = "v5.3.2"
     _started_ver = None
 
     @classmethod
@@ -788,14 +735,8 @@ with tab_clipper:
                 if not uploaded_video_path:
                     logs.append("Fetching video stream with yt-dlp...")
                     status_box.info("\n".join(logs))
-                    # Route via local pproxy tunnel to Surfshark Mumbai HTTPS proxy
-                    tunnel_proxy = ensure_pproxy_tunnel()
-                    if tunnel_proxy:
-                        proxy_val = tunnel_proxy
-                    else:
-                        proxy_val = st.session_state.get("surfshark_proxy") or os.environ.get("SURFSHARK_PROXY") or os.environ.get("HTTP_PROXY") or ""
-                        if "surfshark.com" in proxy_val.lower():
-                            proxy_val = ""
+                    # Direct download without proxy
+                    proxy_val = ""
                     
                     # Check for Netscape cookies
                     cookies_file = Path(__file__).parent / "data" / "cookies.txt"
