@@ -50,7 +50,7 @@ except ImportError:
     unidecode = None
 
 # Auto-install essential runtime packages if missing
-for _pkg in ["ytdlp-jsc", "imageio-ffmpeg", "curl-cffi", "deno", "yt-dlp-ejs"]:
+for _pkg in ["ytdlp-jsc", "imageio-ffmpeg", "curl-cffi", "yt-dlp-ejs"]:
     try:
         __import__(_pkg.replace("-", "_"))
     except ImportError:
@@ -2145,9 +2145,12 @@ async def process_video_job(
                 pass
             common_args.extend(get_js_runtime_args())
 
-            # If local PO token server is active, hook yt-dlp bgutil plugin to 127.0.0.1:4416
+            # Configure bgutil PO token plugin: strictly disable the slow/hanging script mode (generate_once.ts)
             pot_active = _tunnel_listening(4416)
-            pot_args = ["--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"] if pot_active else []
+            if pot_active:
+                pot_args = ["--extractor-args", "youtubepot-bgutilscript:disable=1;youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"]
+            else:
+                pot_args = ["--extractor-args", "youtubepot-bgutilscript:disable=1;youtubepot-bgutilhttp:disable=1"]
             base_dl_args = list(common_args) + pot_args
             tunnel_args = None
 
@@ -2274,7 +2277,7 @@ async def process_video_job(
                         *v_args,
                         "--no-cookies",
                         "--print", "before_dl:title:%(title)s",
-                        "--extractor-args", f"{'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416;' if pot_active else ''}youtube:player_client=android_vr,web,mweb,tv",
+                        "--extractor-args", f"{'youtubepot-bgutilscript:disable=1;youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416;' if pot_active else 'youtubepot-bgutilscript:disable=1;youtubepot-bgutilhttp:disable=1;'}youtube:player_client=web,mweb,android_vr,tv",
                         "-f", format_selector,
                         "--merge-output-format", "mp4",
                         "-o", str(raw_source_file),
