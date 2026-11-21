@@ -1,6 +1,5 @@
 ffmpeg
-nodejs
-npm
 git
+nodejs
 fonts-dejavu-core
 fonts-liberation
