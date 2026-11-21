@@ -14,7 +14,9 @@ requests
 requests-toolbelt
 unidecode
 opencv-python-headless
-bgutil-ytdlp-pot-provider==1.3.1
+bgutil-ytdlp-pot-provider
 ytdlp-jsc
+yt-dlp-ejs
+deno
 imageio-ffmpeg
 curl-cffi
