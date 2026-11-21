@@ -138,8 +138,8 @@ def ensure_pproxy_tunnel() -> Optional[str]:
     if not upstream and hasattr(st, "secrets") and "SURFSHARK_PROXY" in st.secrets:
         upstream = str(st.secrets["SURFSHARK_PROXY"]).strip()
 
-    if not upstream or "amark" in upstream:
-        upstream = "http+ssl://in-mum.prod.surfshark.com:443#9wPLNgvh3BzX7Bp4AhkMVcam:G7YDFVncQSzp6SENwjJAS2Mu"
+    if not upstream:
+        return None
 
     if upstream.startswith("http://") or upstream.startswith("https://"):
         m = re.match(r'https?://([^:]+):([^@]+)@([^:/]+):?(\d+)?', upstream)
@@ -185,7 +185,7 @@ def _tunnel_listening(port: int = 8125) -> bool:
 
 class BotDaemonManager:
     _proc = None
-    _code_ver = "v5.2.3"
+    _code_ver = "v5.3.0"
     _started_ver = None
 
     @classmethod
