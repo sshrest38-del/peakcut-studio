@@ -23,6 +23,7 @@ import math
 import uuid
 import random
 import asyncio
+import threading
 import base64
 import shutil
 import tempfile
@@ -577,6 +578,136 @@ def transcribe_clip_audio_with_gemini(audio_path: Path, gemini_key: str, clip_of
         print(f"[Gemini Audio Transcribe Exception] {e}")
     return snippets
 
+def _drawtext_font() -> str:
+    """Returns fontfile parameter if DejaVuSans-Bold.ttf exists, else empty string."""
+    fpath = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    if fpath.exists():
+        return f":fontfile='{fpath.as_posix()}'"
+    return ""
+
+def _speed_to_bps(speed_str: str) -> float:
+    """
+    Parses speed string like '8.63KiB/s', '1.2MiB/s', '500B/s' into bytes per second.
+    Returns -1.0 if unknown or unparseable.
+    """
+    if not speed_str:
+        return -1.0
+    s = speed_str.strip()
+    m = re.search(r'([0-9\.]+)\s*([A-Za-z/]+)', s)
+    if not m:
+        return -1.0
+    try:
+        val = float(m.group(1))
+        unit = m.group(2).lower()
+        if "gib" in unit:
+            return val * 1024 * 1024 * 1024
+        elif "mib" in unit or "mb" in unit:
+            return val * 1024 * 1024
+        elif "kib" in unit or "kb" in unit:
+            return val * 1024
+        elif "b/s" in unit or "b" in unit:
+            return val
+        return val * 1024
+    except Exception:
+        return -1.0
+
+def _strip_proxy_and_impersonate(args: list) -> list:
+    """Removes pairs of '--proxy <val>' and '--impersonate <val>' from arguments list."""
+    out = []
+    skip_next = False
+    for a in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if a in ("--proxy", "--impersonate"):
+            skip_next = True
+            continue
+        out.append(a)
+    return out
+
+def _update_ytdlp_async():
+    """Background daemon thread to auto-update yt-dlp to latest pre-release."""
+    def worker():
+        try:
+            print("[yt-dlp auto-update] Checking and updating yt-dlp in background...")
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp[default]"],
+                capture_output=True,
+                timeout=240
+            )
+            print("[yt-dlp auto-update] Completed.")
+        except Exception as e:
+            print(f"[yt-dlp auto-update] Background update skipped: {e}")
+    t = threading.Thread(target=worker, daemon=True, name="ytdlp-updater")
+    t.start()
+
+def _start_pot_provider_async():
+    """Background daemon thread to setup and run YouTube PO Token provider server on 127.0.0.1:4416."""
+    def worker():
+        try:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1.0)
+                if s.connect_ex(("127.0.0.1", 4416)) == 0:
+                    print("[POT Provider] Server already active on 127.0.0.1:4416")
+                    return
+
+            node_exe = shutil.which("node") or shutil.which("nodejs")
+            npm_exe = shutil.which("npm")
+            git_exe = shutil.which("git")
+            if not (node_exe and npm_exe and git_exe):
+                print(f"[POT Provider] Missing prerequisites (node={node_exe}, npm={npm_exe}, git={git_exe}). Skipping.")
+                return
+
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-q", "bgutil-ytdlp-pot-provider==1.3.1"],
+                    capture_output=True, timeout=90
+                )
+            except Exception as pe:
+                print(f"[POT Provider] pip install bgutil error: {pe}")
+
+            pot_dir = DATA_DIR / "bgutil-pot"
+            pot_server = pot_dir / "server"
+            repo_url = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git"
+            if not (pot_server / "build" / "main.js").exists():
+                if not pot_dir.exists():
+                    res = subprocess.run(
+                        [git_exe, "clone", "--depth", "1", "--branch", "1.3.1", repo_url, str(pot_dir)],
+                        capture_output=True, timeout=90
+                    )
+                    if res.returncode != 0:
+                        res = subprocess.run(
+                            [git_exe, "clone", "--depth", "1", "--branch", "v1.3.1", repo_url, str(pot_dir)],
+                            capture_output=True, timeout=90
+                        )
+                    if res.returncode != 0:
+                        subprocess.run(
+                            [git_exe, "clone", "--depth", "1", repo_url, str(pot_dir)],
+                            capture_output=True, timeout=90
+                        )
+
+                if pot_server.exists():
+                    subprocess.run(["npm", "ci"], cwd=pot_server, capture_output=True, shell=True, timeout=120)
+                    subprocess.run(["npx", "tsc"], cwd=pot_server, capture_output=True, shell=True, timeout=120)
+
+            main_js = pot_server / "build" / "main.js"
+            if main_js.exists():
+                log_file = DATA_DIR / "pot_server.log"
+                f_log = open(log_file, "a", encoding="utf-8")
+                subprocess.Popen(
+                    [node_exe, "build/main.js"],
+                    cwd=pot_server,
+                    stdout=f_log,
+                    stderr=subprocess.STDOUT
+                )
+                print("[POT Provider] Started bgutil PO token server on 127.0.0.1:4416")
+        except Exception as e:
+            print(f"[POT Provider] Error starting PO token provider: {e}")
+
+    t = threading.Thread(target=worker, daemon=True, name="pot-provider")
+    t.start()
+
 def build_ass_subtitles(snippets: list, clip_start: float, clip_end: float, out_path: Path, gemini_key: str = ""):
     """
     Builds clean, vibrant, non-overlapping ASS subtitles burned in the lower area (Y=1620) of 9:16 video.
@@ -653,8 +784,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if cur_g:
         groups.append(cur_g)
 
-    # 4. Generate subtitle events with explicit position: \\an5\\pos(540,1620)
-    # This locks text cleanly in the bottom third and CAN NEVER stack vertically to the top of screen!
+    # 4. Generate subtitle events with explicit position: \\an5\\pos(540,1380)
+    # This places captions in the clear middle-lower zone, completely safe from player controls and bottom overlays!
     for i, g in enumerate(groups):
         g_s_rel = max(0.0, g[0]["s"] - offset)
         g_e_rel = min(clip_end - clip_start, g[-1]["e"] - offset)
@@ -666,7 +797,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         if g_e_rel - g_s_rel >= 0.15:
             text = " ".join(w["w"] for w in g)
-            events.append(f"Dialogue: 0,{to_ass_time(g_s_rel)},{to_ass_time(g_e_rel)},Bounce,,0,0,0,,{{\\an5\\pos(540,1620)}}{text}")
+            events.append(f"Dialogue: 0,{to_ass_time(g_s_rel)},{to_ass_time(g_e_rel)},Bounce,,0,0,0,,{{\\an5\\pos(540,1380)}}{text}")
 
     out_path.write_text(ass_head + "\n".join(events) + "\n", encoding="utf-8")
 
@@ -1771,74 +1902,6 @@ def ensure_pproxy_tunnel() -> Optional[str]:
     Spawns a local pproxy daemon listening on 127.0.0.1:8125 that bridges
     to Surfshark HTTPS proxy on in-mum.prod.surfshark.com:443.
     """
-    global _PPROXY_PROC
-    if _PPROXY_PROC is not None and _PPROXY_PROC.poll() is None:
-        return "http://127.0.0.1:8125"
-
-    # Auto-install pproxy if missing in the environment
-    try:
-        import pproxy
-    except ImportError:
-        try:
-            print("[Auto-Install] pproxy missing, installing via pip...")
-            subprocess.run([sys.executable, "-m", "pip", "install", "pproxy"], capture_output=True, timeout=60)
-            import pproxy
-        except Exception as pie:
-            print(f"[Auto-Install Error] Could not install pproxy: {pie}")
-
-    upstream = os.environ.get("SURFSHARK_PROXY", "").strip()
-    if not upstream:
-        sec_file = ROOT_DIR / ".streamlit" / "secrets.toml"
-        if sec_file.exists():
-            try:
-                for line in sec_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line.startswith("SURFSHARK_PROXY") and "=" in line:
-                        upstream = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        break
-            except Exception:
-                pass
-
-    if not upstream:
-        return None
-
-    # Normalize upstream format if provided as https://user:pass@host:443
-    if upstream.startswith("http://") or upstream.startswith("https://"):
-        m = re.match(r'https?://([^:]+):([^@]+)@([^:/]+):?(\d+)?', upstream)
-        if m:
-            u, p, h, pt = m.groups()
-            pt = pt or "443"
-            upstream = f"http+ssl://{h}:{pt}#{u}:{p}"
-
-    try:
-        p_log = DATA_DIR / "pproxy.log"
-        p_out = open(p_log, "a", encoding="utf-8")
-        cmd = [
-            sys.executable, "-m", "pproxy",
-            "-l", "http://127.0.0.1:8125",
-            "-r", upstream,
-            "-v"
-        ]
-        _PPROXY_PROC = subprocess.Popen(
-            cmd,
-            stdout=p_out,
-            stderr=p_out
-        )
-        time.sleep(1.2)
-        if _PPROXY_PROC.poll() is None:
-            print("[PProxy Tunnel Active] 127.0.0.1:8125 -> Surfshark Mumbai (443)")
-            return "http://127.0.0.1:8125"
-        else:
-            print(f"[PProxy Exit Error] Process exited with code {_PPROXY_PROC.poll()}")
-    except Exception as e:
-        print(f"[PProxy Warning] Could not start pproxy tunnel: {e}")
-
-    # A tunnel left over from an earlier run may already hold the port, which makes a new one
-    # exit at once. If something is answering there, that is the tunnel: use it rather than
-    # quietly going out without the VPN, which is what YouTube refuses.
-    if _tunnel_listening():
-        print("[PProxy Tunnel Active] Reusing the tunnel already listening on 127.0.0.1:8125")
-        return "http://127.0.0.1:8125"
     return None
 
 
@@ -1957,7 +2020,6 @@ async def process_video_job(
                 "--no-check-certificates",
                 "--socket-timeout", "20",
                 "--concurrent-fragments", "8",
-                "--http-chunk-size", "10M",
                 "--retries", "5",
                 "--fragment-retries", "5",
             ]
@@ -1968,30 +2030,15 @@ async def process_video_job(
                 pass
             common_args.extend(get_js_runtime_args())
 
-            # A personal proxy (never the forced Surfshark one) goes on the attempts that leave
-            # straight from this machine. The VPN tunnel is used only by the attempts that go
-            # without cookies: cookies belong to the address they were exported from, and
-            # YouTube rejects them when they arrive from the tunnel's address instead. The
-            # tunnel is what gets around "sign in to confirm you're not a bot" when this
-            # machine's own address is refused.
-            pxy = load_bot_config().get("proxy", "").strip()
-            if not (pxy and pxy.startswith("http") and "surfshark.com" not in pxy.lower()):
-                pxy = ""
-            base_dl_args = common_args + (["--proxy", pxy] if pxy else [])
-
+            # No proxy on cloud server; ensure direct connection
+            pxy = ""
+            base_dl_args = list(common_args)
             tunnel_args = None
-            tunnel = ensure_pproxy_tunnel()
-            if tunnel:
-                tunnel_args = common_args + ["--proxy", tunnel]
 
-            # Cookies are given to the attempts that can use them. The iOS client ignores them
-            # and yt-dlp drops it from the list when they are passed, which leaves a download
-            # with no video formats at all ("Only images are available").
             cookie_args = ["--cookies", str(cookies_file)] if has_cookies else []
 
-            # Match client to authentication: web client for web cookies
-            client_args = ["--extractor-args",
-                           "youtube:player_client=web,default" if has_cookies else "youtube:player_client=ios,mweb"]
+            # Do not force client to avoid PO token failures
+            client_args = []
 
             await update_status("🔍 <b>Connecting to High-Speed Stream Extractor...</b>\n<code>Analyzing video stream and subtitles...</code>", force=True)
 
@@ -2007,8 +2054,6 @@ async def process_video_job(
                         "--print", "duration",
                         source_url_or_path
                     ]
-                    # a minute, not fifteen seconds: the proof-of-token helper starts Deno, which
-                    # on a cold start takes longer than that on its own
                     p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                     if p.returncode == 0 and p.stdout.strip():
                         lines = [x.strip() for x in p.stdout.strip().splitlines() if x.strip()]
@@ -2066,8 +2111,6 @@ async def process_video_job(
                 if not line:
                     break
                 line_str = line.decode('utf-8', errors='ignore')
-                # only the lines that explain a failure are kept: progress lines would push the
-                # useful ones out of the small window
                 if any(k in line_str for k in ("ERROR", "WARNING", "Sign in", "TransportError")):
                     dl_err_lines.append(line_str.strip())
                     if len(dl_err_lines) > 25:
@@ -2097,8 +2140,8 @@ async def process_video_job(
                     )
                     await update_status(status_text)
 
-                spd_val = parse_speed_kib(last_spd)
-                if spd_val >= 0 and spd_val < 150.0 and cur_p < 90.0:
+                spd_bps = _speed_to_bps(last_spd)
+                if spd_bps >= 0 and spd_bps < (150.0 * 1024) and cur_p < 90.0:
                     if slow_start is None:
                         slow_start = time.time()
                     elif time.time() - slow_start >= 25.0:
@@ -2108,28 +2151,26 @@ async def process_video_job(
                         except Exception:
                             pass
                         break
-                elif spd_val >= 150.0:
+                elif spd_bps >= (150.0 * 1024):
                     slow_start = None
 
             await process.wait()
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0 or (slow_start and time.time() - slow_start >= 25.0):
                 cleanup_partial_sources(job_dir)
 
-            # ATTEMPT 2: the iOS / TV client, which needs no proof-of-token.
+            # ATTEMPT 2: Zero-cookies retry with unauthenticated clients
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
-                variants = []
-                if tunnel_args:
-                    variants.append((tunnel_args, "through the VPN tunnel"))
-                variants.append((base_dl_args, "straight from this machine"))
-                if pxy:
-                    variants.append((common_args, "without any proxy"))
+                variants = [
+                    (base_dl_args, "straight from this machine"),
+                    (_strip_proxy_and_impersonate(common_args), "without proxy / TLS impersonation"),
+                ]
 
                 for v_args, where in variants:
                     if raw_source_file.exists() and raw_source_file.stat().st_size > 0:
                         break
                     cleanup_partial_sources(job_dir)
                     await update_status(
-                        "🔄 <b>Retrying with Zero-Cookies TV Stream Engine...</b>\n"
+                        "🔄 <b>Retrying with Zero-Cookies Stream Engine...</b>\n"
                         f"<i>Streaming video directly without cookies {where}...</i>",
                         force=True
                     )
@@ -2137,7 +2178,7 @@ async def process_video_job(
                         sys.executable, "-m", "yt_dlp",
                         *v_args,
                         "--no-cookies",
-                        "--extractor-args", "youtube:player_client=tv_embedded,tv,visionos",
+                        "--extractor-args", "youtube:player_client=android_vr,tv,web_embedded,mweb",
                         "-f", format_selector,
                         "--merge-output-format", "mp4",
                         "-o", str(raw_source_file),
@@ -2186,8 +2227,8 @@ async def process_video_job(
                             )
                             await update_status(status_text)
 
-                        spd_val2 = parse_speed_kib(last_spd2)
-                        if spd_val2 >= 0 and spd_val2 < 150.0 and cur_p2 < 90.0:
+                        spd_bps2 = _speed_to_bps(last_spd2)
+                        if spd_bps2 >= 0 and spd_bps2 < (150.0 * 1024) and cur_p2 < 90.0:
                             if slow_start2 is None:
                                 slow_start2 = time.time()
                             elif time.time() - slow_start2 >= 25.0:
@@ -2197,7 +2238,7 @@ async def process_video_job(
                                 except Exception:
                                     pass
                                 break
-                        elif spd_val2 >= 150.0:
+                        elif spd_bps2 >= (150.0 * 1024):
                             slow_start2 = None
 
                     await proc2.wait()
@@ -2419,7 +2460,7 @@ async def process_video_job(
                     active_layout = "gameplay"
             else:
                 if layout_setting == "split":
-                    active_layout = "crop"
+                    active_layout = "blur"
 
             layout_desc = "AI Split Screen (Facecam Top)" if (active_layout == "split" and facecam_box) else (
                 "AI Gameplay (Facecam Corner)" if (active_layout == "gameplay" and facecam_box) else active_layout.title()
@@ -2471,12 +2512,12 @@ async def process_video_job(
                     f"[b]scale={out_w}:{int(out_h * 0.85)}:force_original_aspect_ratio=increase,crop={out_w}:{int(out_h * 0.85)}[fg];"
                     f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
                 )
-            else:  # "blur" or default Pro Shorts Layout (70% screen height)
+            else:  # "blur" or default Pro Shorts Layout (Full video centered without cropping + dynamic blurred fill)
                 vf = (
                     f"split[a][b];"
-                    f"[a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=25:5,eq=brightness=-0.15[bg];"
-                    f"[b]scale={out_w}:1350:force_original_aspect_ratio=increase,crop={out_w}:1350[fg];"
-                    f"[bg][fg]overlay=0:285"
+                    f"[a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=25:5,eq=brightness=-0.20:saturation=1.15[bg];"
+                    f"[b]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
                 )
 
             # Add Bold Hook Banner on top of video if style is enabled
@@ -2484,8 +2525,7 @@ async def process_video_job(
                 clean_hook = re.sub(r"[^a-zA-Z0-9\s!?\-\.]", "", hook_text).strip()
                 if clean_hook:
                     hook_y = 110 if (active_layout == "split" and facecam_box) else 140
-                    dejavu_bold = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
-                    font_arg = f":fontfile='{dejavu_bold.as_posix()}'" if dejavu_bold.exists() else ""
+                    font_arg = _drawtext_font()
                     vf += f",drawtext=text='{clean_hook}'{font_arg}:fontcolor=black:fontsize=52:box=1:boxcolor=white@0.95:boxborderw=18:x=(w-text_w)/2:y={hook_y}"
 
             # Burn Spoken Dialogue Subtitles inside video
@@ -3665,6 +3705,10 @@ loop = None
 async def main():
     global loop
     loop = asyncio.get_running_loop()
+
+    # Launch background auto-update and PO token provider
+    _update_ytdlp_async()
+    _start_pot_provider_async()
 
     cfg = load_bot_config()
     token = cfg.get("bot_token", "").strip()
