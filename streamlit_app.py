@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 # Auto-install essential runtime packages if missing
-for _pkg in ["ytdlp-jsc", "imageio-ffmpeg"]:
+for _pkg in ["ytdlp-jsc", "imageio-ffmpeg", "deno", "yt-dlp-ejs"]:
     try:
         __import__(_pkg.replace("-", "_"))
     except ImportError:
@@ -89,11 +89,43 @@ def _starts_here(exe: str) -> bool:
         return False
 
 
+def _find_deno() -> Optional[str]:
+    """Finds Deno binary from PATH, python dir, or deno python package."""
+    w = shutil.which("deno")
+    if w:
+        return w
+    local_deno = Path(sys.executable).parent / ("deno.exe" if sys.platform.startswith("win") else "deno")
+    if local_deno.exists():
+        return str(local_deno)
+    try:
+        import deno
+        d_bin = deno.find_deno_bin()
+        if d_bin and Path(d_bin).exists():
+            return str(d_bin)
+    except Exception:
+        pass
+    return None
+
+
+def _node_ok(exe: Optional[str]) -> bool:
+    """Checks if Node.js major version is >= 20 (yt-dlp requires Node 20+ to solve n challenge)."""
+    if not exe:
+        return False
+    try:
+        res = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=6)
+        if res.returncode == 0:
+            m = re.search(r'v(\d+)\.', res.stdout.strip())
+            if m and int(m.group(1)) >= 20:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def get_js_runtime_args() -> list:
     """
     The JavaScript runtime yt-dlp uses to solve YouTube's challenges, as command line arguments.
-    Candidates are tried in order and the first one that starts on this machine wins; the answer
-    is remembered, because it cannot change while the app is running.
+    Order of preference: Deno -> Node (>=20) -> QuickJS (bin/qjs).
     """
     global _JS_RUNTIME_ARGS
     if _JS_RUNTIME_ARGS is None:
@@ -107,7 +139,12 @@ def get_js_runtime_args() -> list:
                     or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None)
                     or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None))
         _JS_RUNTIME_ARGS = []
-        for kind, exe in (("node", node_sys), ("quickjs", str(qjs_bin)), ("deno", shutil.which("deno"))):
+        candidates = [
+            ("deno", _find_deno()),
+            ("node", node_sys if _node_ok(node_sys) else None),
+            ("quickjs", str(qjs_bin)),
+        ]
+        for kind, exe in candidates:
             if exe and _starts_here(exe):
                 _JS_RUNTIME_ARGS = ["--js-runtimes", f"{kind}:{exe}", "--remote-components", "ejs:github"]
                 break
@@ -132,7 +169,7 @@ def _tunnel_listening(port: int = 8125) -> bool:
 
 class BotDaemonManager:
     _proc = None
-    _code_ver = "v5.3.2"
+    _code_ver = "v5.3.3"
     _started_ver = None
 
     @classmethod
