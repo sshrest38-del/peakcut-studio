@@ -153,21 +153,23 @@ def load_bot_config() -> dict:
         except Exception:
             pass
 
-    # Read .streamlit/secrets.toml if running on Streamlit Cloud
+    # Read .streamlit/secrets.toml if running on Streamlit Cloud or locally
     sec_file = ROOT_DIR / ".streamlit" / "secrets.toml"
     if sec_file.exists():
         try:
             import tomllib
             with open(sec_file, "rb") as sf:
                 sec_dict = tomllib.load(sf)
-                if sec_dict.get("TELEGRAM_BOT_TOKEN") and not cfg.get("bot_token"):
-                    cfg["bot_token"] = sec_dict["TELEGRAM_BOT_TOKEN"]
-                if sec_dict.get("GEMINI_API_KEY") and not cfg.get("gemini_keys"):
-                    cfg["gemini_keys"] = sec_dict["GEMINI_API_KEY"]
-                if sec_dict.get("ZERNIO_API_KEY") and not cfg.get("zernio_api_key"):
-                    cfg["zernio_api_key"] = sec_dict["ZERNIO_API_KEY"]
-                if sec_dict.get("ZERNIO_ACCOUNT_ID") and not cfg.get("zernio_account_id"):
-                    cfg["zernio_account_id"] = sec_dict["ZERNIO_ACCOUNT_ID"]
+                for k, v in sec_dict.items():
+                    val = str(v).strip()
+                    if k in ("TELEGRAM_BOT_TOKEN", "_FALLBACK_BOT_TOKEN", "FALLBACK_BOT_TOKEN", "BOT_TOKEN") and not cfg.get("bot_token"):
+                        cfg["bot_token"] = val
+                    elif k in ("GEMINI_API_KEYS", "GEMINI_API_KEY", "_FALLBACK_GEMINI_KEY", "FALLBACK_GEMINI_KEY", "PEAKCUT_AI_KEY") and not cfg.get("gemini_keys"):
+                        cfg["gemini_keys"] = val
+                    elif k in ("ZERNIO_API_KEY", "_FALLBACK_ZERNIO_KEY", "FALLBACK_ZERNIO_KEY", "ZERNIO_KEY") and not cfg.get("zernio_api_key"):
+                        cfg["zernio_api_key"] = val
+                    elif k in ("ZERNIO_ACCOUNT_ID", "_FALLBACK_ZERNIO_ACC", "FALLBACK_ZERNIO_ACC", "ZERNIO_ACC") and not cfg.get("zernio_account_id"):
+                        cfg["zernio_account_id"] = val
                 if sec_dict.get("YOUTUBE_COOKIES"):
                     c_file = DATA_DIR / "cookies.txt"
                     if not c_file.exists() or c_file.stat().st_size < 20:
@@ -181,13 +183,42 @@ def load_bot_config() -> dict:
     _FALLBACK_ZERNIO_ACC = ""
     _FALLBACK_PROXY = ""
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("bot_token") or _FALLBACK_BOT_TOKEN
-    gemini_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or cfg.get("gemini_keys") or _FALLBACK_GEMINI_KEY
+    token = (
+        os.environ.get("TELEGRAM_BOT_TOKEN")
+        or os.environ.get("_FALLBACK_BOT_TOKEN")
+        or os.environ.get("FALLBACK_BOT_TOKEN")
+        or os.environ.get("BOT_TOKEN")
+        or cfg.get("bot_token")
+        or _FALLBACK_BOT_TOKEN
+    )
+    gemini_keys = (
+        os.environ.get("GEMINI_API_KEYS")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("_FALLBACK_GEMINI_KEY")
+        or os.environ.get("FALLBACK_GEMINI_KEY")
+        or os.environ.get("PEAKCUT_AI_KEY")
+        or cfg.get("gemini_keys")
+        or _FALLBACK_GEMINI_KEY
+    )
     proxy = cfg.get("proxy", "")
     if proxy and ("surfshark.com" in proxy.lower() or not proxy.startswith("http")):
         proxy = ""
-    zernio_key = os.environ.get("ZERNIO_API_KEY") or cfg.get("zernio_api_key") or _FALLBACK_ZERNIO_KEY
-    zernio_acc = os.environ.get("ZERNIO_ACCOUNT_ID") or cfg.get("zernio_account_id") or _FALLBACK_ZERNIO_ACC
+    zernio_key = (
+        os.environ.get("ZERNIO_API_KEY")
+        or os.environ.get("_FALLBACK_ZERNIO_KEY")
+        or os.environ.get("FALLBACK_ZERNIO_KEY")
+        or os.environ.get("ZERNIO_KEY")
+        or cfg.get("zernio_api_key")
+        or _FALLBACK_ZERNIO_KEY
+    )
+    zernio_acc = (
+        os.environ.get("ZERNIO_ACCOUNT_ID")
+        or os.environ.get("_FALLBACK_ZERNIO_ACC")
+        or os.environ.get("FALLBACK_ZERNIO_ACC")
+        or os.environ.get("ZERNIO_ACC")
+        or cfg.get("zernio_account_id")
+        or _FALLBACK_ZERNIO_ACC
+    )
 
     return {
         "bot_token": token.strip(),
