@@ -50,7 +50,7 @@ except ImportError:
     unidecode = None
 
 # Auto-install essential runtime packages if missing
-for _pkg in ["pproxy", "ytdlp-jsc", "imageio-ffmpeg", "curl-cffi"]:
+for _pkg in ["ytdlp-jsc", "imageio-ffmpeg", "curl-cffi", "deno", "yt-dlp-ejs"]:
     try:
         __import__(_pkg.replace("-", "_"))
     except ImportError:
@@ -116,11 +116,43 @@ def _starts_here(exe: str) -> bool:
         return False
 
 
+def _find_deno() -> Optional[str]:
+    """Finds Deno binary from PATH, python dir, or deno python package."""
+    w = shutil.which("deno")
+    if w:
+        return w
+    local_deno = Path(sys.executable).parent / ("deno.exe" if sys.platform.startswith("win") else "deno")
+    if local_deno.exists():
+        return str(local_deno)
+    try:
+        import deno
+        d_bin = deno.find_deno_bin()
+        if d_bin and Path(d_bin).exists():
+            return str(d_bin)
+    except Exception:
+        pass
+    return None
+
+
+def _node_ok(exe: Optional[str]) -> bool:
+    """Checks if Node.js major version is >= 20 (yt-dlp requires Node 20+ to solve n challenge)."""
+    if not exe:
+        return False
+    try:
+        res = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=6)
+        if res.returncode == 0:
+            m = re.search(r'v(\d+)\.', res.stdout.strip())
+            if m and int(m.group(1)) >= 20:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def get_js_runtime_args() -> list:
     """
     The JavaScript runtime yt-dlp uses to solve YouTube's challenges, as command line arguments.
-    Candidates are tried in order and the first one that starts on this machine wins; the answer
-    is remembered, because it cannot change while the bot is running.
+    Order of preference: Deno -> Node (>=20) -> QuickJS (bin/qjs).
     """
     global _JS_RUNTIME_ARGS
     if _JS_RUNTIME_ARGS is None:
@@ -134,7 +166,12 @@ def get_js_runtime_args() -> list:
                     or ("/usr/bin/node" if Path("/usr/bin/node").exists() else None)
                     or ("/usr/bin/nodejs" if Path("/usr/bin/nodejs").exists() else None))
         _JS_RUNTIME_ARGS = []
-        for kind, exe in (("node", node_sys), ("quickjs", str(qjs_bin)), ("deno", shutil.which("deno"))):
+        candidates = [
+            ("deno", _find_deno()),
+            ("node", node_sys if _node_ok(node_sys) else None),
+            ("quickjs", str(qjs_bin)),
+        ]
+        for kind, exe in candidates:
             if exe and _starts_here(exe):
                 _JS_RUNTIME_ARGS = ["--js-runtimes", f"{kind}:{exe}", "--remote-components", "ejs:github"]
                 break
@@ -641,72 +678,137 @@ def _update_ytdlp_async():
     t = threading.Thread(target=worker, daemon=True, name="ytdlp-updater")
     t.start()
 
+_POT_THREAD = None
+
+def _pot_log(msg: str):
+    """Logs PO Token provider status to console and data/pot_setup.log."""
+    print(f"[POT Provider] {msg}")
+    try:
+        log_f = DATA_DIR / "pot_setup.log"
+        with open(log_f, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
 def _start_pot_provider_async():
-    """Background daemon thread to setup and run YouTube PO Token provider server on 127.0.0.1:4416."""
+    """Background daemon thread to setup and run YouTube PO Token provider server on 127.0.0.1:4416 using Deno."""
+    global _POT_THREAD
+
     def worker():
         try:
             import socket
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(1.0)
                 if s.connect_ex(("127.0.0.1", 4416)) == 0:
-                    print("[POT Provider] Server already active on 127.0.0.1:4416")
+                    _pot_log("Server already running on 127.0.0.1:4416.")
                     return
 
-            node_exe = shutil.which("node") or shutil.which("nodejs")
-            npm_exe = shutil.which("npm")
+            deno_bin = _find_deno()
             git_exe = shutil.which("git")
-            if not (node_exe and npm_exe and git_exe):
-                print(f"[POT Provider] Missing prerequisites (node={node_exe}, npm={npm_exe}, git={git_exe}). Skipping.")
+            if not deno_bin or not git_exe:
+                _pot_log(f"Missing prerequisites (deno={deno_bin}, git={git_exe}). Cannot start PO token server.")
                 return
 
+            _pot_log(f"Found prerequisites (deno={deno_bin}, git={git_exe}). Updating bgutil-ytdlp-pot-provider...")
             try:
                 subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-q", "bgutil-ytdlp-pot-provider==1.3.1"],
+                    [sys.executable, "-m", "pip", "install", "-q", "-U", "bgutil-ytdlp-pot-provider"],
                     capture_output=True, timeout=90
                 )
             except Exception as pe:
-                print(f"[POT Provider] pip install bgutil error: {pe}")
+                _pot_log(f"pip install bgutil warning: {pe}")
+
+            ver = "1.3.2"
+            try:
+                import importlib.metadata
+                ver = importlib.metadata.version("bgutil-ytdlp-pot-provider") or "1.3.2"
+            except Exception:
+                pass
+            _pot_log(f"Target bgutil version: {ver}")
 
             pot_dir = DATA_DIR / "bgutil-pot"
             pot_server = pot_dir / "server"
             repo_url = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git"
-            if not (pot_server / "build" / "main.js").exists():
-                if not pot_dir.exists():
+
+            if not (pot_server / "src" / "main.ts").exists():
+                if pot_dir.exists():
+                    try:
+                        shutil.rmtree(pot_dir)
+                    except Exception:
+                        pass
+                _pot_log(f"Cloning bgutil repository branch {ver}...")
+                res = subprocess.run(
+                    [git_exe, "clone", "--depth", "1", "--branch", ver, repo_url, str(pot_dir)],
+                    capture_output=True, timeout=90
+                )
+                if res.returncode != 0:
+                    _pot_log(f"Retrying clone with branch v{ver}...")
                     res = subprocess.run(
-                        [git_exe, "clone", "--depth", "1", "--branch", "1.3.1", repo_url, str(pot_dir)],
+                        [git_exe, "clone", "--depth", "1", "--branch", f"v{ver}", repo_url, str(pot_dir)],
                         capture_output=True, timeout=90
                     )
-                    if res.returncode != 0:
-                        res = subprocess.run(
-                            [git_exe, "clone", "--depth", "1", "--branch", "v1.3.1", repo_url, str(pot_dir)],
-                            capture_output=True, timeout=90
-                        )
-                    if res.returncode != 0:
-                        subprocess.run(
-                            [git_exe, "clone", "--depth", "1", repo_url, str(pot_dir)],
-                            capture_output=True, timeout=90
-                        )
+                if res.returncode != 0:
+                    _pot_log("Retrying clone default branch...")
+                    subprocess.run(
+                        [git_exe, "clone", "--depth", "1", repo_url, str(pot_dir)],
+                        capture_output=True, timeout=90
+                    )
 
-                if pot_server.exists():
-                    subprocess.run(["npm", "ci"], cwd=pot_server, capture_output=True, shell=True, timeout=120)
-                    subprocess.run(["npx", "tsc"], cwd=pot_server, capture_output=True, shell=True, timeout=120)
+            if not pot_server.exists():
+                _pot_log("server/ folder not found after cloning. Aborting.")
+                return
 
-            main_js = pot_server / "build" / "main.js"
-            if main_js.exists():
-                log_file = DATA_DIR / "pot_server.log"
-                f_log = open(log_file, "a", encoding="utf-8")
-                subprocess.Popen(
-                    [node_exe, "build/main.js"],
-                    cwd=pot_server,
-                    stdout=f_log,
-                    stderr=subprocess.STDOUT
+            _pot_log("Installing server dependencies via Deno (deno install --allow-scripts=npm:canvas --frozen)...")
+            res_inst = subprocess.run(
+                [deno_bin, "install", "--allow-scripts=npm:canvas", "--frozen"],
+                cwd=str(pot_server), capture_output=True, timeout=120
+            )
+            if res_inst.returncode != 0:
+                _pot_log("Frozen install failed, retrying deno install without --frozen...")
+                subprocess.run(
+                    [deno_bin, "install", "--allow-scripts=npm:canvas"],
+                    cwd=str(pot_server), capture_output=True, timeout=120
                 )
-                print("[POT Provider] Started bgutil PO token server on 127.0.0.1:4416")
-        except Exception as e:
-            print(f"[POT Provider] Error starting PO token provider: {e}")
 
-    t = threading.Thread(target=worker, daemon=True, name="pot-provider")
-    t.start()
+            _pot_log("Starting Deno PO token provider server on port 4416...")
+            server_log = DATA_DIR / "pot_server.log"
+            f_log = open(server_log, "a", encoding="utf-8")
+            server_cmd = [
+                deno_bin, "run", "--no-prompt",
+                "--allow-env", "--allow-net", "--allow-ffi=.",
+                "--allow-read=.", "--allow-sys",
+                "./src/main.ts", "--port", "4416"
+            ]
+            subprocess.Popen(
+                server_cmd,
+                cwd=str(pot_server),
+                stdout=f_log,
+                stderr=subprocess.STDOUT
+            )
+
+            # Wait up to 40 sec for port 4416 to open
+            _pot_log("Waiting up to 40 seconds for 127.0.0.1:4416 to respond...")
+            started = False
+            for sec in range(40):
+                time.sleep(1.0)
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.8)
+                        if s.connect_ex(("127.0.0.1", 4416)) == 0:
+                            started = True
+                            break
+                except Exception:
+                    pass
+
+            if started:
+                _pot_log("PO token provider server is READY on http://127.0.0.1:4416")
+            else:
+                _pot_log("Timed out waiting for port 4416. Check data/pot_server.log.")
+        except Exception as e:
+            _pot_log(f"Exception starting PO token provider: {e}")
+
+    _POT_THREAD = threading.Thread(target=worker, daemon=True, name="pot-provider")
+    _POT_THREAD.start()
 
 def build_ass_subtitles(snippets: list, clip_start: float, clip_end: float, out_path: Path, gemini_key: str = ""):
     """
@@ -1956,6 +2058,18 @@ async def process_video_job(
         all_snippets = []
 
         if not is_local_file:
+            # WAIT FOR READY: agar _POT_THREAD alive hai to status dikhao aur thread khatam hone tak ruko
+            if _POT_THREAD and _POT_THREAD.is_alive():
+                for it in range(80):
+                    if not _POT_THREAD.is_alive() or _tunnel_listening(4416):
+                        break
+                    await update_status(
+                        f"🛡️ <b>First start: preparing anti-403 server, 1-3 min...</b>\n"
+                        f"<code>[██████░░░░░░] Configuring Deno PO token provider ({it * 3}s)...</code>",
+                        force=True
+                    )
+                    await asyncio.sleep(3)
+
             cookies_file = DATA_DIR / "cookies.txt"
             if not cookies_file.exists() or cookies_file.stat().st_size < 20:
                 for c_cand in [ROOT_DIR / "cookies.txt", ROOT_DIR / "data" / "cookies.txt"]:
@@ -2178,7 +2292,7 @@ async def process_video_job(
                         sys.executable, "-m", "yt_dlp",
                         *v_args,
                         "--no-cookies",
-                        "--extractor-args", "youtube:player_client=android_vr,tv,web_embedded,mweb",
+                        "--extractor-args", "youtube:player_client=web_safari,tv,mweb,android_vr",
                         "-f", format_selector,
                         "--merge-output-format", "mp4",
                         "-o", str(raw_source_file),
@@ -2297,9 +2411,11 @@ async def process_video_job(
 
             if not raw_source_file.exists() or raw_source_file.stat().st_size == 0:
                 recent_err = "\n".join([x for x in dl_err_lines if "ERROR:" in x or "WARNING:" in x or "Sign in" in x or "TransportError" in x][-6:])
+                pot_status = "running" if _tunnel_listening(4416) else "NOT running (see data/pot_setup.log)"
                 fail_text = (
                     f"❌ <b>Download Error Encountered:</b>\n\n"
                     f"<code>{recent_err or 'No media streams found.'}</code>\n\n"
+                    f"🛡️ <b>PO token server:</b> <code>{pot_status}</code>\n\n"
                     "💡 <b>Tips:</b>\n"
                     "1. Upload or forward any video file (MP4/MOV) directly here.\n"
                     "2. Or export and send fresh <code>cookies.txt</code> to this bot."
