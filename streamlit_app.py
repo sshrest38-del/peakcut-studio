@@ -146,7 +146,7 @@ def get_js_runtime_args() -> list:
         ]
         for kind, exe in candidates:
             if exe and _starts_here(exe):
-                _JS_RUNTIME_ARGS = ["--js-runtimes", f"{kind}:{exe}", "--remote-components", "ejs:github"]
+                _JS_RUNTIME_ARGS = ["--js-runtimes", f"{kind}:{exe}"]
                 break
     return list(_JS_RUNTIME_ARGS)
 
@@ -169,7 +169,7 @@ def _tunnel_listening(port: int = 8125) -> bool:
 
 class BotDaemonManager:
     _proc = None
-    _code_ver = "v5.3.3"
+    _code_ver = "v5.3.4"
     _started_ver = None
 
     @classmethod
