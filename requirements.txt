@@ -8,7 +8,7 @@ sherpa-onnx
 soundfile
 SQLAlchemy
 uvicorn
-yt-dlp
+yt-dlp[default]
 pillow
 requests
 requests-toolbelt
